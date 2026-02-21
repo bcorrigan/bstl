@@ -339,6 +339,37 @@ impl App {
         (categories, apps)
     }
 
+    /// Get the list of directories to search for .desktop files
+    fn get_desktop_app_paths() -> Vec<String> {
+        let mut paths = Vec::new();
+
+        // 1. XDG_DATA_HOME (defaults to ~/.local/share)
+        let data_home = std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty());
+        if let Some(home) = data_home {
+            paths.push(format!("{}/applications", home));
+        } else if let Ok(home) = std::env::var("HOME") {
+            paths.push(format!("{}/.local/share/applications", home));
+        }
+
+        // 2. XDG_DATA_DIRS (defaults to /usr/local/share:/usr/share)
+        let data_dirs = std::env::var("XDG_DATA_DIRS").ok().filter(|s| !s.is_empty());
+        match data_dirs {
+            Some(dirs) => {
+                for dir in dirs.split(':') {
+                    if !dir.is_empty() {
+                        paths.push(format!("{}/applications", dir));
+                    }
+                }
+            }
+            None => {
+                paths.push("/usr/local/share/applications".to_string());
+                paths.push("/usr/share/applications".to_string());
+            }
+        }
+
+        paths
+    }
+
     /// Load .desktop apps from local and system directories
     fn load_desktop_apps() -> (Vec<String>, Vec<AppEntry>) {
         use std::collections::{HashMap, HashSet};
@@ -348,10 +379,7 @@ impl App {
         let mut seen_apps: HashSet<String> = HashSet::new();
         let mut seen_files: HashSet<String> = HashSet::new(); // Track processed .desktop files
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
-        let local_dir = format!("{}/.local/share/applications", home);
-
-        let paths = vec![local_dir, "/usr/share/applications".to_string()];
+        let paths = Self::get_desktop_app_paths();
 
         // Get current desktop environment once
         let current_desktops: Vec<String> = std::env::var("XDG_CURRENT_DESKTOP")
@@ -646,5 +674,57 @@ impl App {
             }
         }
         gui_bins
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_desktop_app_paths_xdg_set() {
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", "/tmp/xdg_home");
+            std::env::set_var("XDG_DATA_DIRS", "/tmp/xdg_dir1:/tmp/xdg_dir2");
+        }
+        
+        let paths = App::get_desktop_app_paths();
+        
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0], "/tmp/xdg_home/applications");
+        assert_eq!(paths[1], "/tmp/xdg_dir1/applications");
+        assert_eq!(paths[2], "/tmp/xdg_dir2/applications");
+    }
+
+    #[test]
+    fn test_get_desktop_app_paths_defaults() {
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("XDG_DATA_DIRS");
+            std::env::set_var("HOME", "/home/test");
+        }
+
+        let paths = App::get_desktop_app_paths();
+
+        // Note: The order should be XDG_DATA_HOME (defaulted), then each in XDG_DATA_DIRS (defaulted)
+        assert_eq!(paths[0], "/home/test/.local/share/applications");
+        assert_eq!(paths[1], "/usr/local/share/applications");
+        assert_eq!(paths[2], "/usr/share/applications");
+    }
+
+    #[test]
+    fn test_get_desktop_app_paths_empty_vars() {
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", "");
+            std::env::set_var("XDG_DATA_DIRS", "");
+            std::env::set_var("HOME", "/home/test");
+        }
+
+        let paths = App::get_desktop_app_paths();
+
+        // Should fall back to defaults just like when unset
+        assert_eq!(paths[0], "/home/test/.local/share/applications");
+        assert_eq!(paths[1], "/usr/local/share/applications");
+        assert_eq!(paths[2], "/usr/share/applications");
     }
 }
