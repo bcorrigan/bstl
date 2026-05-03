@@ -1,12 +1,12 @@
-@author "Dustin Pilgrim"
-@Description "Dustin's simple TUI launcher"
+@author "Bazza Corrigan"
+@Description "Bazza's simple TUI launcher (fork of Dustin Pilgrim's dstl)"
 
 # You can import external theme files using the gather keyword:
 # gather "~/.config/themes/catppuccin.rune" as theme
 # gather "./my-theme.rune"
 # The theme loader will automatically detect and use imported theme settings
 
-dstl:
+bstl:
     # Whether to use dmenu-style fuzzy search mode
     dmenu = false
     # Where the search bar appears (options: "top" or "bottom")
@@ -23,10 +23,19 @@ dstl:
     terminal = "alacritty"
     # Close the process after configured timeout (in seconds)
     timeout 25
-    # Maximum number of recent apps to track
+    # Maximum number of recent apps shown in the "Recent" category (dual-pane)
     max_recent_apps = 15
-    # Show recent apps first in the list
-    recent_first = false
+    # When true, the empty-query default view leads with the most-launched apps
+    # in the configured window before the rest of the alphabetical list.
+    recent_first = true
+    # Number of apps shown at the top of the default view when recent_first = true.
+    top_recent_count = 5
+    # Trailing window (in days) used to compute popularity for default-view
+    # ranking and search tie-breaking.
+    history_window_days = 90
+    # Multiplier applied to launch counts when adding a popularity bonus to
+    # search scores. Higher values make popular apps win ties more decisively.
+    popularity_weight = 10
     theme:
         # Border color of panels (hex format: #RRGGBB)
         border = "#ffffff"

@@ -3,6 +3,7 @@ mod config;
 mod events;
 mod icons;
 mod launch;
+mod storage;
 mod sway;
 mod ui;
 
@@ -22,6 +23,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
+    rc::Rc,
     sync::mpsc::{channel, Receiver},
     thread,
     time::{Duration, Instant},
@@ -29,11 +31,12 @@ use std::{
 
 use app::{App, Focus, Mode, SinglePaneMode};
 use config::{CursorShape, load_launcher_config};
+use storage::Storage;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let socket_path = "/tmp/dstl.sock";
+    let socket_path = "/tmp/bstl.sock";
 
     // Try to connect to existing instance
     match UnixStream::connect(socket_path) {
@@ -74,6 +77,14 @@ fn main() -> Result<()> {
 
     let cfg = load_launcher_config();
 
+    // Open storage and refresh the .desktop cache. mtime checks make this
+    // close to free when nothing has been installed since last launch.
+    let mut storage = Storage::open()?;
+    let dirs = storage::xdg_application_dirs();
+    let desktops = storage::current_desktops();
+    storage.refresh_app_cache(&dirs, &desktops)?;
+    let storage = Rc::new(storage);
+
     let single_pane_mode = if cfg.dmenu {
         SinglePaneMode::Dmenu
     } else {
@@ -85,7 +96,7 @@ fn main() -> Result<()> {
         config::StartMode::Single => Mode::SinglePane,
     };
 
-    let mut app = App::new(single_pane_mode, start_mode, &cfg);
+    let mut app = App::new(single_pane_mode, start_mode, &cfg, Rc::clone(&storage));
 
     let print_only = cfg.print_selection || std::env::args().any(|arg| arg == "--print-selection");
     let sway_mode = cfg.sway || std::env::args().any(|arg| arg == "--sway");
@@ -185,7 +196,7 @@ fn main() -> Result<()> {
 fn run_with_writer<W: Write + ExecutableCommand>(
     mut writer: W,
     app: &mut App,
-    cfg: &config::DstlConfig,
+    cfg: &config::BstlConfig,
     rx: &Receiver<()>,
 ) -> Result<()> {
     set_cursor_color(&mut writer, &cfg.colors.cursor_color)?;
@@ -275,7 +286,7 @@ fn parse_hex_color(color: &str) -> Option<(u8, u8, u8)> {
 fn run_app<B: Backend + ExecutableCommand>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    cfg: &config::DstlConfig,
+    cfg: &config::BstlConfig,
     rx: &Receiver<()>,
 ) -> Result<()>
 where
@@ -346,7 +357,7 @@ where
 fn warmup_icons<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &App,
-    cfg: &config::DstlConfig,
+    cfg: &config::BstlConfig,
 ) -> Result<()>
 where
     <B as Backend>::Error: Send + Sync + 'static,

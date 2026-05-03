@@ -1,9 +1,9 @@
 use crate::app::{App, AppEntry, Focus};
 use crate::ui::layout;
-use crate::config::{DstlConfig, SearchPosition};
+use crate::config::{BstlConfig, SearchPosition};
 use ratatui::Frame;
 
-pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, config: &DstlConfig) {
+pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, config: &BstlConfig) {
     let (search_area, content_area) = layout::vertical_split(f, 3, search_position);
     
     // Pass input to render_search_bar

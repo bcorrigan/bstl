@@ -1,9 +1,9 @@
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 use crate::app::AppEntry;
-use crate::config::DstlConfig;
+use crate::config::BstlConfig;
 
-pub fn build_command(entry: &AppEntry, config: &DstlConfig) -> Command {
+pub fn build_command(entry: &AppEntry, config: &BstlConfig) -> Command {
     let terminal = &config.terminal;
 
     if entry.terminal || entry.needs_terminal() {
@@ -36,7 +36,7 @@ pub fn build_command(entry: &AppEntry, config: &DstlConfig) -> Command {
     }
 }
 
-pub fn launch_app(entry: &AppEntry, config: &DstlConfig) {
+pub fn launch_app(entry: &AppEntry, config: &BstlConfig) {
     let mut cmd = build_command(entry, config);
 
     // Fully detach (don't block, don't get killed with parent)
@@ -57,10 +57,10 @@ pub fn launch_app(entry: &AppEntry, config: &DstlConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DstlConfig, SearchPosition, StartMode, LauncherTheme, CursorShape};
+    use crate::config::{BstlConfig, SearchPosition, StartMode, LauncherTheme, CursorShape};
 
-    fn make_config(terminal: &str) -> DstlConfig {
-        DstlConfig {
+    fn make_config(terminal: &str) -> BstlConfig {
+        BstlConfig {
             dmenu: false,
             search_position: SearchPosition::Top,
             start_mode: StartMode::Single,
@@ -82,6 +82,9 @@ mod tests {
             recent_first: false,
             print_selection: false,
             sway: false,
+            history_window_days: 90,
+            top_recent_count: 5,
+            popularity_weight: 10,
         }
     }
 

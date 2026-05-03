@@ -1,191 +1,213 @@
-<h1 align="center">dstl (Sway Fork)</h1>
+<h1 align="center">bstl</h1>
 
-<p align="center"><b>Dustin's Simple TUI Launcher</b> - A fast, keyboard-driven application launcher for the terminal with fuzzy search and extensive theming support. This is a fork specialized for better Sway integration and a stateless, Emacs-friendly UX.</p>
+<p align="center"><b>Bazza's Simple TUI Launcher</b> — a fast, keyboard-driven application launcher for the terminal.</p>
 
-## Fork Features
+> **Fork notice.** `bstl` is a fork of [dstl](https://github.com/saltnpepper97/dstl) ("Dustin's Simple TUI Launcher") by saltnpepper97. The upstream project is no longer actively maintained and this fork has diverged substantially in behaviour, internal layout, and configuration. The original MIT licence and copyright are preserved (see `LICENSE`).
 
-- 🏢 **Sway Integration** - seamless execution via `swayexec` IPC (avoids process hierarchy issues) and smart fullscreen handling (un-fullscreens for launch, restores if cancelled)
-- 🔄 **Toggleable Launcher** - Automatically detects if another instance is running and sends a quit signal, allowing you to bind a single key to both open and close the launcher.
-- ⌨️ **Stateless UX** - Typing always goes to search, arrow keys always navigate lists. No modes to switch focus.
-- 🎹 **Emacs Keybindings** - GNU Readline style shortcuts (`Ctrl-a`, `Ctrl-e`, `Ctrl-k`, `Ctrl-u`, etc.)
-- 🎨 **Enhanced Visuals** - Clear distinction between focused and unfocused lists in dual-pane mode via themable colors
-- 🚀 **Direct Execution** - Can print selection to stdout or execute directly
+## Highlights
 
-## Features (Inherited)
-
-- 🚀 **Fast fuzzy search** - Quickly find applications as you type
-- 🎨 **Highly customizable** - Extensive theming with hex color support
-- 📱 **Dual view modes** - Switch between single-pane and dual-pane (category + apps) layouts
-- 📋 **Recent apps tracking** - Quick access to frequently used applications
-- 🎯 **Smart cursor** - Full cursor control with blinking support
-- 🔧 **Flexible configuration** - Uses `.rune` config format with import/gather support
+- 🏢 **Sway integration** — execution via `swayexec` IPC (avoids the launcher being parent of the launched process), and smart fullscreen handling (un-fullscreens on launch, restores on cancel).
+- 🔄 **Toggle-able** — a second invocation sends a quit signal over a Unix socket, so a single keybinding opens and closes the launcher.
+- ⌨️ **Stateless UX** — typing always goes to search, arrow keys always navigate. No focus modes to remember.
+- 🎹 **Emacs keybindings** — GNU Readline-style shortcuts (`Ctrl-a`, `Ctrl-e`, `Ctrl-k`, `Ctrl-u`, …).
+- 📊 **Launch history & popularity ranking**  — every launch is recorded; frequently-used apps win search ties and lead the default view.
+- 🗄️ **SQLite-backed cache** — `.desktop` files are parsed once and cached; an mtime check on each XDG directory makes the steady-state startup near-free.
+- 🎨 **Highly themable** — extensive theming via the `.rune` config format with hex colors, border styles, cursor shapes, etc.
 
 ## Installation
 
-### From Source
+### From source
 
 ```bash
-git clone https://github.com/saltnpepper97/dstl
-cd dstl
+git clone <this repo>
+cd bstl
 cargo build --release
-sudo cp target/release/dstl /usr/local/bin/
+sudo cp target/release/bstl /usr/local/bin/
 ```
+
+### Migrating from `dstl`
+
+If you previously had `dstl` installed, the first run of `bstl` will:
+- Copy `~/.config/dstl/dstl.rune` → `~/.config/bstl/bstl.rune` (rewriting the top-level `dstl:` document key to `bstl:`). The legacy file is left in place so you can verify and delete it yourself.
+- Move `~/.local/share/dstl/dstl.sqlite` → `~/.local/share/bstl/bstl.sqlite` if the new path doesn't exist (so launch history is preserved).
+- The old `~/.cache/dstl/recent.json` MRU file is read once and folded into the new launches table on first DB creation.
 
 ## Configuration
 
-dstl looks for configuration in the following locations (in order):
-1. `~/.config/dstl/dstl.rune`
-2. `/usr/share/doc/dstl/dstl.rune`
+`bstl` looks for configuration in (in order):
+1. `~/.config/bstl/bstl.rune`
+2. `/usr/share/doc/bstl/bstl.rune`
 
-### Basic Configuration Example
+A complete example lives in `examples/bstl.rune`.
+
+### Minimal example
 
 ```rune
-dstl:
-    # Display mode
+bstl:
     dmenu = false
-    startup_mode = "dual"  # or "single"
-    search_position = "top"  # or "bottom"
-    
-    # Sway Integration
-    sway = true  # Enable Sway IPC integration
-    print_selection = false # Print selected command to stdout instead of launching
-    
-    # Terminal emulator for terminal apps
+    startup_mode = "single"   # or "dual"
+    search_position = "top"   # or "bottom"
+
+    sway = true
+    print_selection = false
     terminal = "foot"
-    
-    # Recent apps settings
+
+    # Launch history / popularity (see "Launch history" section below)
+    recent_first = true
+    top_recent_count = 5
+    history_window_days = 90
+    popularity_weight = 10
     max_recent_apps = 15
-    recent_first = false
-    
-    # Theme configuration
+
     theme:
         border = "#ffffff"
         focus = "#00ff00"
-        unfocused = "#808080" # Color for selection in non-active pane
+        unfocused = "#808080"
         highlight = "#0000ff"
-        cursor_color = "#00ff00"  # defaults to focus color
-        cursor_shape = "block"  # "block", "underline", or "pipe"
-        cursor_blink_interval = 500  # milliseconds, 0 to disable
-        border_style = "rounded"  # "plain", "rounded", "thick", "double"
-        highlight_type = "background"  # or "foreground"
+        cursor_color = "#00ff00"
+        cursor_shape = "block"          # block | underline | pipe
+        cursor_blink_interval = 500     # ms, 0 to disable
+        border_style = "rounded"        # plain | rounded | thick | double
+        highlight_type = "background"   # background | foreground
     end
 end
 ```
 
-### Sway Support
+## Launch history
 
-When `sway = true` (or `--sway` flag is used):
-1. Upon launch, checks if the current window is fullscreen.
-2. If fullscreen, disables it to show the launcher.
-3. If an app is launched, it executes via Sway IPC (`exec <cmd>`), preventing the new app from being a child of the launcher/terminal.
-4. If cancelled (`Esc` or `Ctrl-g`), restores the original window's fullscreen state.
+`bstl` records every launch (timestamp + app name) into a SQLite database at `~/.local/share/bstl/bstl.sqlite`. This drives two features:
 
-### Toggle Behavior
+**Default-view top-N.** With `recent_first = true`, the empty-query view leads with the `top_recent_count` (default 5) most-launched apps within the trailing `history_window_days` window (default 90), followed by the rest of the alphabetical list. So your daily-drivers are always one keystroke away.
 
-`dstl` uses a Unix socket at `/tmp/dstl.sock` to manage instances:
-1. On startup, it checks if the socket exists.
-2. If another instance is already running, it sends a "quit" signal to that instance and exits immediately.
-3. If no other instance is found, it creates the socket and starts as the primary launcher.
+**Search popularity bias.** When two apps both match a query, the one you launch more often wins. Concretely, fuzzy-match scoring adds a popularity bonus of `min(launches_in_window, 100) × popularity_weight`. Prefix matches always rank above fuzzy matches, but within each tier, popular apps surface first — so typing `f` shows Firefox before Final Fantasy.
 
-This allows you to use the same keybinding to toggle the launcher on and off.
+The database is single-user, append-only, and tiny: even years of daily use stay in the megabytes. You can poke at it directly:
 
-# Launch from config (hyprland/sway example)
+```sh
+# Top apps in the last 30 days
+sqlite3 ~/.local/share/bstl/bstl.sqlite \
+  "SELECT name, COUNT(*) FROM launches \
+   WHERE ts > datetime('now','-30 days') \
+   GROUP BY name ORDER BY 2 DESC LIMIT 10"
+
+# Launches per day of week
+sqlite3 ~/.local/share/bstl/bstl.sqlite \
+  "SELECT strftime('%w', ts) AS dow, COUNT(*) FROM launches \
+   GROUP BY dow"
 ```
-# Press $mod+d once to open, press again to close
-bindsym $mod+d exec foot --app-id dstl -e dstl --sway
+
+### Knob reference
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `recent_first`         | `false` | If true, the empty-query view leads with top-N popular apps. |
+| `top_recent_count`     | `5`     | Number of popular apps shown at the top of the default view. |
+| `history_window_days`  | `90`    | Trailing window used to count launches for popularity. |
+| `popularity_weight`    | `10`    | Multiplier applied to launch counts when adding the search bonus. Higher = popular apps win ties more decisively. |
+| `max_recent_apps`      | `15`    | Cap for the MRU list shown in the dual-pane "Recent" category. |
+
+## `.desktop` cache
+
+On startup `bstl` walks `XDG_DATA_HOME` and `XDG_DATA_DIRS` for `.desktop` entries, but only re-parses files whose directory or file mtime has changed since the last run. This makes the warm-startup path essentially free (a handful of `stat()` calls). Flatpak directories are picked up automatically because they're in `XDG_DATA_DIRS`.
+
+The cache lives in the same SQLite database as the launch history. There is no manual refresh command; installing or removing a `.desktop` file always updates the parent directory's mtime, which is what `bstl` uses to decide what to re-scan.
+
+## Sway integration
+
+When `sway = true` (or `--sway` on the command line):
+1. On launch, checks if the current window is fullscreen and disables it so the launcher is visible.
+2. When you pick an app, executes it via Sway IPC (`exec <cmd>`), which prevents the new app from being a child of the launcher process.
+3. If you cancel (`Esc` / `Ctrl-g`), the original window's fullscreen state is restored.
+
+### Recipe: Sway + wezterm
+
+A working setup that pops the launcher up as a centred floating window:
+
+```
+# ~/.config/sway/config
+
+# Spawn bstl inside a wezterm window, tagged with a known class so the
+# for_window rule below can match it. Toggle on / off with the same keybind
+# (the second press reaches the running instance via /tmp/bstl.sock).
+bindsym $mod+d exec wezterm start --class bstl bstl --sway
+
+# Float the launcher and centre it at half the screen size.
+for_window [app_id="bstl"] floating enable, resize set 50ppt 50ppt, move position center
 ```
 
-### Keyboard Shortcuts
+A few things worth noting:
+- `wezterm start --class bstl` sets the Wayland `app_id` to `bstl`, which is what the `for_window` rule keys off.
+- The `--sway` flag tells `bstl` to launch via Sway IPC, so the launched application becomes a sibling of wezterm rather than a child (so closing the wezterm window doesn't kill it). You can also set `sway = true` in the config and drop the flag.
+- If `bstl` isn't on `$PATH`, replace `bstl --sway` with the absolute path (e.g. `/usr/local/bin/bstl --sway`).
 
-#### Global
-- `Tab` / `Ctrl-t` - Toggle between single-pane and dual-pane mode
-- `Ctrl-g` / `Esc` - Quit without launching
-- `Enter` - Launch selected application
+The same pattern works with foot or any other terminal that supports an `app_id`/`--class` flag — just substitute the launcher and update the `for_window` selector.
 
-#### Navigation (Always Active)
-- `↓` - Move down in list
-- `↑` - Move up in list
-- `←` - Move left (to Categories pane in dual-mode)
-- `→` - Move right (to Apps pane in dual-mode)
+## Toggle behaviour
 
-#### Text Editing (Emacs Style)
-- `Type` - Always goes to search bar
-- `Ctrl-a` / `Home` - Jump to start
-- `Ctrl-e` / `End` - Jump to end
-- `Ctrl-b` - Back one char
-- `Ctrl-f` - Forward one char
-- `Ctrl-w` - Delete previous word
-- `Ctrl-u` - Delete to start of line
-- `Ctrl-k` - Delete to end of line
-- `Ctrl-d` / `Delete` - Delete next char
-- `Ctrl-h` / `Backspace` - Delete previous char
+`bstl` uses a Unix socket at `/tmp/bstl.sock`:
+1. On startup, checks if the socket exists.
+2. If another instance is running, sends a "quit" signal to it and exits immediately.
+3. Otherwise, creates the socket and starts as the primary launcher.
 
-## View Modes
+This is what makes the single-keybinding open/close behaviour work — the same `bindsym` opens the launcher on first press and closes it on the second.
 
-### Single-Pane Mode
-Shows all applications in one list with fuzzy search filtering across all categories.
+## Keyboard shortcuts
 
-### Dual-Pane Mode
-- **Left pane**: Categories with app count
-- **Right pane**: Applications in selected category
+### Global
+- `Tab` / `Ctrl-t` — toggle between single-pane and dual-pane mode
+- `Ctrl-x` — toggle dmenu mode (PATH executables) vs. desktop apps in single-pane
+- `Ctrl-g` / `Esc` — quit without launching
+- `Enter` — launch selected application
+
+### Navigation (always active)
+- `↓` / `↑` — move within the current list
+- `←` — move focus to the Categories pane (dual-pane mode)
+- `→` — move focus to the Apps pane (dual-pane mode)
+
+### Text editing (Emacs-style)
+- `Ctrl-a` / `Home` — jump to start of input
+- `Ctrl-e` / `End` — jump to end of input
+- `Ctrl-b` / `Ctrl-f` — back / forward one char
+- `Ctrl-w` — delete previous word
+- `Ctrl-u` — delete to start of line
+- `Ctrl-k` — delete to end of line
+- `Ctrl-d` / `Delete` — delete next char
+- `Ctrl-h` / `Backspace` — delete previous char
+
+## View modes
+
+### Single-pane
+Shows all applications in one list with fuzzy search filtering. With `recent_first = true`, the top-N most-launched apps lead the default view.
+
+### Dual-pane
+- **Left pane**: categories (with a synthetic "Recent" entry on top showing the most recently launched apps)
+- **Right pane**: applications in the selected category
 - Search filters both panes simultaneously
-- Special "Recent" category shows recently launched apps
-- The currently active list (navigable by arrow keys) is highlighted with the `focus` color. The inactive list selection uses the `unfocused` color.
+- The currently active list is highlighted with the `focus` colour; the inactive list uses `unfocused`.
 
-### Advanced Configuration
+## Other settings
 
-### Key Settings Explained
+- **`dmenu`** — start in dmenu-like mode (PATH executables).
+- **`print_selection`** — print the chosen command to stdout instead of executing it. Useful for piping into `swayexec` or similar.
+- **`timeout`** — auto-close after this many seconds of inactivity (`0` = never).
+- **`focus_search_on_switch`** — refocus the search field when toggling between single-pane and dual-pane.
+- **`terminal`** — wrapper for CLI apps. If a single word (`"alacritty"`), `bstl` appends `-e` automatically. If multi-word (`"wezterm start"`), it appends the command directly.
 
-- **`dmenu`**: Enable dmenu-like behavior (boolean)
-- **`sway`**: Enable Sway IPC integration (boolean)
-- **`print_selection`**: Print command to stdout instead of executing (boolean)
-- **`search_position`**: Place search bar at `"top"` or `"bottom"`
-- **`startup_mode`**: Start in `"single"` or `"dual"` pane mode
-- **`timeout`**: Auto-close timeout in milliseconds (0 to disable)
-- **`max_recent_apps`**: Maximum number of recent apps to track
-- **`recent_first`**: Show recent apps category first
-- **`terminal`**: The command used to wrap CLI-based applications.
-  - If a single word (e.g., `"alacritty"`), `dstl` automatically appends `-e` before the application command.
-  - If multiple words (e.g., `"wezterm start"` or `"foot --app-id launcher"`), `dstl` appends the application command directly. This allows using specific terminal subcommands or existing processes.
-  - **Example**: `terminal = "wezterm start"` results in `wezterm start helix` being executed.
+### Cursor
 
-### Cursor Customization
+- **`cursor_shape`** — `block`, `underline`, or `pipe`
+- **`cursor_blink_interval`** — milliseconds; `0` disables blinking
+- **`cursor_color`** — hex; defaults to `focus`
 
-- **`cursor_shape`**: Visual style of the cursor
-  - `"block"` - Solid block (█)
-  - `"underline"` - Underscore (_)
-  - `"pipe"` - Vertical bar (|)
-- **`cursor_blink_interval`**: Blink speed in milliseconds (0 = no blinking)
-- **`cursor_color`**: Hex color for cursor (defaults to focus color)
+### Borders
 
-### Border Styles
+`plain`, `rounded`, `thick`, `double`.
 
-- `"plain"` - Simple lines
-- `"rounded"` - Rounded corners
-- `"thick"` - Bold lines
-- `"double"` - Double-line borders
+### Highlight
 
-### Highlight Types
-
-- `"background"` - Highlight with background color (selected text is black)
-- `"foreground"` - Highlight with foreground color only
-
-## Desktop Entry Detection
-
-dstl automatically scans for `.desktop` files in standard XDG directories to populate the application list. Categories are extracted from desktop entries.
-
-## Tips
-
-- Use fuzzy search to quickly find apps by typing partial names
-- The search algorithm scores matches, showing best matches first
-- Recent apps are persistent across sessions
-- Cursor stays visible and solid while typing or moving
-- Navigate between search and lists seamlessly with arrow keys
+- `background` — selected entry rendered with a coloured background (text becomes black)
+- `foreground` — selected entry rendered with coloured text only
 
 ## License
 
-MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT (see `LICENSE`). Originally `Copyright (c) 2025 saltnpepper97` for the upstream `dstl` project; fork-specific changes © Barry Corrigan, same licence.

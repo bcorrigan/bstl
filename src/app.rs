@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::Instant;
-use crate::config::DstlConfig;
+use crate::config::BstlConfig;
+use crate::storage::Storage;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use tui_input::Input;
@@ -39,7 +42,9 @@ pub struct App {
     pub selected_app: usize,
     pub focus: Focus,
     pub app_to_launch: Option<String>,
-    pub config: DstlConfig,
+    pub config: BstlConfig,
+    pub popularity: HashMap<String, u32>,
+    pub storage: Rc<Storage>,
     fuzzy_matcher: SkimMatcherV2,
 }
 
@@ -60,6 +65,8 @@ impl Clone for App {
             focus: self.focus,
             app_to_launch: self.app_to_launch.clone(),
             config: self.config.clone(),
+            popularity: self.popularity.clone(),
+            storage: Rc::clone(&self.storage),
             fuzzy_matcher: SkimMatcherV2::default(),
         }
     }
@@ -82,6 +89,8 @@ impl std::fmt::Debug for App {
             .field("focus", &self.focus)
             .field("app_to_launch", &self.app_to_launch)
             .field("config", &self.config)
+            .field("popularity", &self.popularity)
+            .field("storage", &"Storage")
             .field("fuzzy_matcher", &"SkimMatcherV2")
             .finish()
     }
@@ -108,20 +117,32 @@ impl AppEntry {
 }
 
 impl App {
-    /// Initialize the app with specified single pane mode and start mode
-    pub fn new(single_pane_mode: SinglePaneMode, start_mode: Mode, config: &DstlConfig) -> Self {
+    /// Initialize the app with specified single pane mode and start mode.
+    pub fn new(
+        single_pane_mode: SinglePaneMode,
+        start_mode: Mode,
+        config: &BstlConfig,
+        storage: Rc<Storage>,
+    ) -> Self {
         let (categories, apps, mode, focus) = match start_mode {
             Mode::SinglePane => {
-                let (cats, apps) = Self::load_for_mode(single_pane_mode);
+                let (cats, apps) = Self::load_for_mode(single_pane_mode, &storage);
                 (cats, apps, Mode::SinglePane, Focus::Apps)
             }
             Mode::DualPane => {
-                let (cats, apps) = Self::load_desktop_apps();
+                let (cats, apps) = Self::load_desktop_apps(&storage);
                 (cats, apps, Mode::DualPane, Focus::Categories)
             }
         };
 
-        let mut app = Self {
+        let popularity = storage
+            .popularity_map(config.history_window_days)
+            .unwrap_or_default();
+        let recent_apps = storage
+            .recent_names(config.max_recent_apps.max(1))
+            .unwrap_or_default();
+
+        Self {
             mode,
             single_pane_mode,
             should_quit: false,
@@ -130,19 +151,16 @@ impl App {
             cursor_last_toggle: Instant::now(),
             categories,
             apps,
-            recent_apps: Vec::new(),
+            recent_apps,
             selected_category: 0,
             selected_app: 0,
             focus,
             app_to_launch: None,
             config: config.clone(),
+            popularity,
+            storage,
             fuzzy_matcher: SkimMatcherV2::default(),
-        };
-
-        // Load recent apps from disk
-        let _ = app.load_recent();
-
-        app
+        }
     }
 
     /// Helper to get the current search query
@@ -150,51 +168,21 @@ impl App {
         self.input.value().to_string()
     }
 
-    /// Add an app to the recent list
+    /// Record a launch: persist to storage and update in-memory recency &
+    /// popularity caches so the same instance reflects the change immediately.
     pub fn add_to_recent(&mut self, app_name: String) {
-        // Remove the app if it already exists (to avoid duplicates)
+        let _ = self.storage.record_launch(&app_name);
+
+        // MRU bookkeeping (used by the "Recent" category in DualPane mode).
         self.recent_apps.retain(|a| a != &app_name);
-        
-        // Add to the front of the list
-        self.recent_apps.insert(0, app_name);
-        
-        // Keep only the configured number of recent apps
-        let max_recent = self.config.max_recent_apps;
+        self.recent_apps.insert(0, app_name.clone());
+        let max_recent = self.config.max_recent_apps.max(1);
         if self.recent_apps.len() > max_recent {
             self.recent_apps.truncate(max_recent);
         }
 
-        // Save to disk
-        let _ = self.save_recent();
-    }
-
-    /// Save recent apps to disk
-    pub fn save_recent(&self) -> std::io::Result<()> {
-        let config_dir = dirs::cache_dir()
-            .map(|p| p.join("dstl"))
-            .unwrap();
-        
-        fs::create_dir_all(&config_dir)?;
-        let recent_file = config_dir.join("recent.json");
-        
-        let json = serde_json::to_string_pretty(&self.recent_apps)?;
-        fs::write(recent_file, json)?;
-        Ok(())
-    }
-
-    /// Load recent apps from disk
-    pub fn load_recent(&mut self) -> std::io::Result<()> {
-        let config_dir = dirs::cache_dir()
-            .map(|p| p.join("dstl"))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        
-        let recent_file = config_dir.join("recent.json");
-        
-        if recent_file.exists() {
-            let json = fs::read_to_string(recent_file)?;
-            self.recent_apps = serde_json::from_str(&json).unwrap_or_default();
-        }
-        Ok(())
+        // Popularity bump.
+        *self.popularity.entry(app_name).or_insert(0) += 1;
     }
 
     pub fn visible_apps(&self) -> Vec<&AppEntry> {
@@ -213,27 +201,35 @@ impl App {
             matched.into_iter().map(|(a, _)| a).collect()
         };
 
-        // If recent_first and not searching, reorder
-        if query.is_empty() && self.config.recent_first && !self.recent_apps.is_empty() {
-            let mut recent_list = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+        // Empty-query default view: top N by popularity in the configured window,
+        // followed by everything else in the underlying order.
+        if query.is_empty() && self.config.recent_first && !self.popularity.is_empty() {
+            let top_n = self.config.top_recent_count.max(1);
 
-            // Add recent apps first (must exist in apps)
-            for recent_name in &self.recent_apps {
-                if let Some(app) = apps.iter().find(|a| a.name == *recent_name) {
-                    recent_list.push(*app);
-                    seen.insert(recent_name.clone());
-                }
-            }
+            // Rank apps that have any recorded launches by count desc, name asc.
+            let mut ranked: Vec<&AppEntry> = apps
+                .iter()
+                .copied()
+                .filter(|a| self.popularity.contains_key(&a.name))
+                .collect();
+            ranked.sort_by(|a, b| {
+                let ca = self.popularity.get(&a.name).copied().unwrap_or(0);
+                let cb = self.popularity.get(&b.name).copied().unwrap_or(0);
+                cb.cmp(&ca)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+            ranked.truncate(top_n);
 
-            // Add remaining apps
+            let top_names: HashSet<String> =
+                ranked.iter().map(|a| a.name.clone()).collect();
+
+            let mut out = ranked;
             for app in apps {
-                if !seen.contains(&app.name) {
-                    recent_list.push(app);
+                if !top_names.contains(&app.name) {
+                    out.push(app);
                 }
             }
-
-            apps = recent_list;
+            apps = out;
         }
 
         apps
@@ -267,20 +263,20 @@ impl App {
     pub fn toggle_mode(&mut self) {
         match self.mode {
             Mode::SinglePane => {
-                let (categories, apps) = Self::load_desktop_apps();
+                let (categories, apps) = Self::load_desktop_apps(&self.storage);
                 self.categories = categories;
                 self.apps = apps;
                 self.mode = Mode::DualPane;
-                
+
                 // Keep leftmost pane focused when switching to DualPane
                 self.focus = Focus::Categories;
             }
             Mode::DualPane => {
-                let (categories, apps) = Self::load_for_mode(self.single_pane_mode);
+                let (categories, apps) = Self::load_for_mode(self.single_pane_mode, &self.storage);
                 self.categories = categories;
                 self.apps = apps;
                 self.mode = Mode::SinglePane;
-                
+
                 // Leftmost pane in SinglePane is Apps
                 self.focus = Focus::Apps;
             }
@@ -300,7 +296,7 @@ impl App {
 
         // Always switch to SinglePane to show the new list
         self.mode = Mode::SinglePane;
-        let (categories, apps) = Self::load_for_mode(self.single_pane_mode);
+        let (categories, apps) = Self::load_for_mode(self.single_pane_mode, &self.storage);
         self.categories = categories;
         self.apps = apps;
         self.selected_app = 0;
@@ -308,7 +304,10 @@ impl App {
         self.focus = Focus::Apps;
     }
 
-    /// Check if an app matches the search query using fuzzy matching (case-insensitive)
+    /// Check if an app matches the search query using fuzzy matching
+    /// (case-insensitive). Tiered: prefix matches always rank above fuzzy
+    /// matches; within each tier, popularity in the configured window breaks
+    /// ties so frequently-launched apps surface first.
     pub fn matches_search(&self, app_name: &str, query: &str) -> Option<i64> {
         if query.is_empty() {
             return Some(0); // Empty query matches everything
@@ -316,287 +315,68 @@ impl App {
 
         let app_name_lower = app_name.to_lowercase();
         let query_lower = query.to_lowercase();
+        let bonus = self.popularity_bonus(app_name);
 
-        // Exact prefix match gets highest priority
+        // Prefix tier: large base score puts these above fuzzy matches.
+        // Capped popularity bonus keeps a low-frequency new app discoverable.
         if app_name_lower.starts_with(&query_lower) {
-            return Some(i64::MAX); // Push to top
+            return Some(1_000_000 + bonus);
         }
 
-        // Fuzzy match otherwise
-        self.fuzzy_matcher.fuzzy_match(&app_name_lower, &query_lower)
+        // Fuzzy tier: combine score with popularity.
+        self.fuzzy_matcher
+            .fuzzy_match(&app_name_lower, &query_lower)
+            .map(|s| s + bonus)
+    }
+
+    fn popularity_bonus(&self, app_name: &str) -> i64 {
+        let count = self.popularity.get(app_name).copied().unwrap_or(0) as i64;
+        // Cap so a habit can't permanently shadow new apps.
+        count.min(100) * self.config.popularity_weight
     }
 
     /// Load apps based on the single pane mode
-    fn load_for_mode(mode: SinglePaneMode) -> (Vec<String>, Vec<AppEntry>) {
+    fn load_for_mode(mode: SinglePaneMode, storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
         let (categories, mut apps) = match mode {
-            SinglePaneMode::DesktopApps => Self::load_desktop_apps(),
-            SinglePaneMode::Dmenu => Self::load_from_path("/usr/bin"),
+            SinglePaneMode::DesktopApps => Self::load_desktop_apps(storage),
+            SinglePaneMode::Dmenu => Self::load_from_path("/usr/bin", storage),
         };
-        
+
         // Sort apps alphabetically for single pane mode
         apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        
+
         (categories, apps)
     }
 
-    /// Get the list of directories to search for .desktop files
-    fn get_desktop_app_paths() -> Vec<String> {
-        let mut paths = Vec::new();
+    /// Load .desktop apps from the storage cache and derive the category list.
+    fn load_desktop_apps(storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
+        let apps = storage.load_apps().unwrap_or_default();
 
-        // 1. XDG_DATA_HOME (defaults to ~/.local/share)
-        let data_home = std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty());
-        if let Some(home) = data_home {
-            paths.push(format!("{}/applications", home));
-        } else if let Ok(home) = std::env::var("HOME") {
-            paths.push(format!("{}/.local/share/applications", home));
+        let mut category_set: HashSet<String> = HashSet::new();
+        for a in &apps {
+            category_set.insert(a.category.clone());
         }
 
-        // 2. XDG_DATA_DIRS (defaults to /usr/local/share:/usr/share)
-        let data_dirs = std::env::var("XDG_DATA_DIRS").ok().filter(|s| !s.is_empty());
-        match data_dirs {
-            Some(dirs) => {
-                for dir in dirs.split(':') {
-                    if !dir.is_empty() {
-                        paths.push(format!("{}/applications", dir));
-                    }
-                }
-            }
-            None => {
-                paths.push("/usr/local/share/applications".to_string());
-                paths.push("/usr/share/applications".to_string());
-            }
-        }
-
-        paths
-    }
-
-    /// Load .desktop apps from local and system directories
-    fn load_desktop_apps() -> (Vec<String>, Vec<AppEntry>) {
-        use std::collections::{HashMap, HashSet};
-
-        let mut apps = Vec::new();
-        let mut category_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut seen_apps: HashSet<String> = HashSet::new();
-        let mut seen_files: HashSet<String> = HashSet::new(); // Track processed .desktop files
-
-        let paths = Self::get_desktop_app_paths();
-
-        // Get current desktop environment once
-        let current_desktops: Vec<String> = std::env::var("XDG_CURRENT_DESKTOP")
-            .or_else(|_| std::env::var("DESKTOP_SESSION"))
-            .unwrap_or_default()
-            .split(':')
-            .map(|s| s.trim().to_lowercase())
-            .collect();
-
-        for dir in paths {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
-                        continue;
-                    }
-
-                    // Get the base filename to check for duplicates across directories
-                    let filename = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
-                    
-                    // Skip if we've already processed this .desktop file from another directory
-                    if seen_files.contains(&filename) {
-                        continue;
-                    }
-                    seen_files.insert(filename.clone());
-
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let mut name = None;
-                        let mut generic_name = None;
-                        let mut exec = None;
-                        let mut categories = None;
-                        let mut no_display = false;
-                        let mut terminal = false;
-                        let mut only_show_in: Option<Vec<String>> = None;
-                        let mut not_show_in: Option<Vec<String>> = None;
-                        let mut in_desktop_entry = false;
-
-                        for line in content.lines() {
-                            let line = line.trim();
-                            
-                            // Track sections
-                            if line.starts_with('[') {
-                                in_desktop_entry = line == "[Desktop Entry]";
-                                continue;
-                            }
-                            
-                            // Only parse inside [Desktop Entry] section
-                            if !in_desktop_entry {
-                                continue;
-                            }
-                            
-                            // Parse key=value pairs
-                            if let Some((key, value)) = line.split_once('=') {
-                                // Skip localized entries like Name[af]=, Comment[de]=, etc.
-                                if key.contains('[') {
-                                    continue;
-                                }
-                                
-                                let key = key.trim();
-                                let value = value.trim();
-                                
-                                match key {
-                                    "Name" => name = Some(value.to_string()),
-                                    "GenericName" => generic_name = Some(value.to_string()),
-                                    "Exec" => exec = Some(value.to_string()),
-                                    "Categories" => categories = Some(value.to_string()),
-                                    "NoDisplay" => no_display = value == "true",
-                                    "Hidden" => no_display = no_display || value == "true",
-                                    "Terminal" => terminal = value == "true",
-                                    "OnlyShowIn" => {
-                                        only_show_in = Some(
-                                            value.split(';')
-                                                .map(|s| s.trim())
-                                                .filter(|s| !s.is_empty())
-                                                .map(|s| s.to_string())
-                                                .collect()
-                                        );
-                                    }
-                                    "NotShowIn" => {
-                                        not_show_in = Some(
-                                            value.split(';')
-                                                .map(|s| s.trim())
-                                                .filter(|s| !s.is_empty())
-                                                .map(|s| s.to_string())
-                                                .collect()
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-
-                        // Skip apps marked as NoDisplay or Hidden
-                        if no_display {
-                            continue;
-                        }
-                        
-                        // Use Name, or fallback to GenericName
-                        let name = name.or(generic_name);
-
-                        // Check OnlyShowIn - skip if specified and current desktop not in list
-                        if let Some(desktops) = &only_show_in {
-                            let allowed = desktops.iter()
-                                .any(|d| current_desktops.contains(&d.to_lowercase()));
-                            
-                            if !allowed {
-                                continue;
-                            }
-                        }
-
-                        // Check NotShowIn - skip if current desktop is in list
-                        if let Some(desktops) = &not_show_in {
-                            let blocked = desktops.iter()
-                                .any(|d| current_desktops.contains(&d.to_lowercase()));
-                            if blocked {
-                                continue;
-                            }
-                        }
-
-                        if let (Some(name), Some(exec)) = (name, exec) {
-                            // Skip if we've already seen this app name
-                            if seen_apps.contains(&name) {
-                                continue;
-                            }
-                            seen_apps.insert(name.clone());
-                            
-                            // Determine grouped category             
-                            let cat_group = if let Some(cats) = categories {
-                                Self::group_category(&cats, &name)
-                            } else {
-                                Self::group_category("", &name)
-                            };
-
-                            // Clean up Exec field codes (%f, %F, %u, %U, etc.)
-                            let exec_clean = Self::clean_exec(&exec);
-
-                            apps.push(AppEntry {
-                                name: name.clone(),
-                                category: cat_group.clone(),
-                                exec: exec_clean,
-                                terminal,
-                            });
-
-                            category_map
-                                .entry(cat_group)
-                                .or_default()
-                                .push(name);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Build the list of grouped categories with Recent first
         let mut categories = vec!["Recent".to_string()];
-        
-        let category_order = vec![
+        let category_order = [
             "Utilities", "Development", "Network", "Audio/Video", "Graphics",
-            "System", "Office", "Games", "Education", "Settings"
+            "System", "Office", "Games", "Education", "Settings",
         ];
         categories.extend(
             category_order
                 .into_iter()
-                .filter(|c| category_map.contains_key(*c))
-                .map(|s| s.to_string())
+                .filter(|c| category_set.contains(*c))
+                .map(|s| s.to_string()),
         );
 
         (categories, apps)
     }
 
-    /// Clean desktop entry Exec field by removing field codes
-    fn clean_exec(exec: &str) -> String {
-        // Remove field codes like %f, %F, %u, %U, %d, %D, %n, %N, %i, %c, %k, %v, %m
-        let mut result = exec.to_string();
-        let field_codes = ["%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k", "%v", "%m"];
-        for code in &field_codes {
-            result = result.replace(code, "");
-        }
-        result.trim().to_string()
-    }
-
-    /// Map raw .desktop categories to simplified groupings 
-    fn group_category(raw: &str, app_name: &str) -> String {
-        let raw = raw.to_lowercase();
-
-        // Special case for Claw
-        if app_name.to_lowercase() == "claw" {
-            return "Utilities".to_string();
-        }
-
-        if app_name.to_lowercase() == "rofi" {
-            return "Utilities".to_string();
-        }
-
-        // Prioritize "game" before "network"
-        if raw.contains("game") { "Games".to_string() }
-        else if raw.contains("utility") { "Utilities".to_string() }
-        else if raw.contains("development") { "Development".to_string() }
-        else if raw.contains("network") { "Network".to_string() }
-        else if raw.contains("audio") || raw.contains("video") { "Audio/Video".to_string() }
-        else if raw.contains("graphics") || raw.contains("2dgraphics") || raw.contains("3dgraphics") {
-            "Graphics".to_string()
-        }
-        else if raw.contains("system") { "System".to_string() }
-        else if raw.contains("office") { "Office".to_string() }
-        else if raw.contains("education") { "Education".to_string() }
-        else if raw.contains("settings") { "Settings".to_string() }
-        else { "Utilities".to_string() }
-    }
-
-    /// Load executables from a directory (dmenu style)
-    fn load_from_path<P: AsRef<Path>>(path: P) -> (Vec<String>, Vec<AppEntry>) {
+    /// Load executables from a directory (dmenu style). Determines GUI status
+    /// from the cached desktop apps so we don't re-scan .desktop files.
+    fn load_from_path<P: AsRef<Path>>(path: P, storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
         let mut apps = Vec::new();
-        let gui_bins = Self::get_known_gui_binaries();
+        let gui_bins = Self::gui_binaries_from_cache(storage);
 
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
@@ -615,61 +395,44 @@ impl App {
             }
         }
 
-        // Dmenu-style uses CLI category for consistency
         (vec!["CLI".to_string()], apps)
     }
 
-    /// Scan desktop files to find binaries that are GUI applications (Terminal=false)
-    fn get_known_gui_binaries() -> std::collections::HashSet<String> {
-        use std::collections::HashSet;
-        let mut gui_bins = HashSet::new();
-        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/home"));
-        let local_dir = format!("{}/.local/share/applications", home);
-        let paths = vec![local_dir, "/usr/share/applications".to_string()];
+    #[cfg(test)]
+    fn for_test(config: BstlConfig, popularity: HashMap<String, u32>) -> Self {
+        Self {
+            mode: Mode::SinglePane,
+            single_pane_mode: SinglePaneMode::DesktopApps,
+            should_quit: false,
+            input: Input::default(),
+            cursor_visible: true,
+            cursor_last_toggle: Instant::now(),
+            categories: Vec::new(),
+            apps: Vec::new(),
+            recent_apps: Vec::new(),
+            selected_category: 0,
+            selected_app: 0,
+            focus: Focus::Apps,
+            app_to_launch: None,
+            config,
+            popularity,
+            storage: Rc::new(Storage::in_memory()),
+            fuzzy_matcher: SkimMatcherV2::default(),
+        }
+    }
 
-        for dir in paths {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
-                        continue;
-                    }
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let mut exec = None;
-                        let mut terminal = false;
-                        let mut in_desktop_entry = false;
-                        
-                        for line in content.lines() {
-                            let line = line.trim();
-                            if line.starts_with('[') {
-                                in_desktop_entry = line == "[Desktop Entry]";
-                                continue;
-                            }
-                            if !in_desktop_entry { continue; }
-                            
-                            if let Some((key, value)) = line.split_once('=') {
-                                let key = key.trim();
-                                let value = value.trim();
-                                match key {
-                                    "Exec" => exec = Some(value.to_string()),
-                                    "Terminal" => terminal = value == "true",
-                                    _ => {}
-                                }
-                            }
-                        }
-                        
-                        if let Some(exec_str) = exec {
-                            if !terminal {
-                                let clean = Self::clean_exec(&exec_str);
-                                if let Some(bin) = clean.split_whitespace().next() {
-                                    let bin_path = Path::new(bin);
-                                    if let Some(name) = bin_path.file_name().and_then(|s| s.to_str()) {
-                                        gui_bins.insert(name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
+    /// Derive the set of known GUI binary names from the cached app list:
+    /// any entry where Terminal=false contributes its first exec token.
+    fn gui_binaries_from_cache(storage: &Storage) -> HashSet<String> {
+        let mut gui_bins: HashSet<String> = HashSet::new();
+        let cached = storage.load_apps().unwrap_or_default();
+        for app in cached {
+            if app.terminal {
+                continue;
+            }
+            if let Some(bin) = app.exec.split_whitespace().next() {
+                if let Some(name) = Path::new(bin).file_name().and_then(|s| s.to_str()) {
+                    gui_bins.insert(name.to_string());
                 }
             }
         }
@@ -680,51 +443,94 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CursorShape, BstlConfig, LauncherTheme, SearchPosition, StartMode};
 
-    #[test]
-    fn test_get_desktop_app_paths_xdg_set() {
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", "/tmp/xdg_home");
-            std::env::set_var("XDG_DATA_DIRS", "/tmp/xdg_dir1:/tmp/xdg_dir2");
+    fn test_config() -> BstlConfig {
+        BstlConfig {
+            dmenu: false,
+            search_position: SearchPosition::Top,
+            start_mode: StartMode::Single,
+            focus_search_on_switch: true,
+            colors: LauncherTheme {
+                border: String::new(),
+                focus: String::new(),
+                unfocused: String::new(),
+                highlight: String::new(),
+                border_style: String::new(),
+                highlight_type: String::new(),
+                cursor_color: String::new(),
+                cursor_shape: CursorShape::Block,
+                cursor_blink_interval: 0,
+            },
+            terminal: "foot".into(),
+            timeout: 0,
+            max_recent_apps: 5,
+            recent_first: true,
+            print_selection: false,
+            sway: false,
+            history_window_days: 90,
+            top_recent_count: 5,
+            popularity_weight: 10,
         }
-        
-        let paths = App::get_desktop_app_paths();
-        
-        assert_eq!(paths.len(), 3);
-        assert_eq!(paths[0], "/tmp/xdg_home/applications");
-        assert_eq!(paths[1], "/tmp/xdg_dir1/applications");
-        assert_eq!(paths[2], "/tmp/xdg_dir2/applications");
     }
 
     #[test]
-    fn test_get_desktop_app_paths_defaults() {
-        unsafe {
-            std::env::remove_var("XDG_DATA_HOME");
-            std::env::remove_var("XDG_DATA_DIRS");
-            std::env::set_var("HOME", "/home/test");
-        }
+    fn prefix_match_with_higher_popularity_wins_tie() {
+        // Both "Firefox" and "Final Fantasy" are prefix matches for "f", but
+        // Firefox has been launched many times. It should rank above.
+        let mut pop = HashMap::new();
+        pop.insert("Firefox".to_string(), 50);
+        pop.insert("Final Fantasy".to_string(), 0);
+        let app = App::for_test(test_config(), pop);
 
-        let paths = App::get_desktop_app_paths();
-
-        // Note: The order should be XDG_DATA_HOME (defaulted), then each in XDG_DATA_DIRS (defaulted)
-        assert_eq!(paths[0], "/home/test/.local/share/applications");
-        assert_eq!(paths[1], "/usr/local/share/applications");
-        assert_eq!(paths[2], "/usr/share/applications");
+        let firefox = app.matches_search("Firefox", "f").unwrap();
+        let final_fantasy = app.matches_search("Final Fantasy", "f").unwrap();
+        assert!(
+            firefox > final_fantasy,
+            "Firefox ({}) should outrank Final Fantasy ({})",
+            firefox,
+            final_fantasy
+        );
     }
 
     #[test]
-    fn test_get_desktop_app_paths_empty_vars() {
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", "");
-            std::env::set_var("XDG_DATA_DIRS", "");
-            std::env::set_var("HOME", "/home/test");
-        }
+    fn prefix_match_always_beats_fuzzy_match_regardless_of_popularity() {
+        // Even if a fuzzy-matched app has been launched a lot, a prefix match
+        // for the query must rank higher.
+        let mut pop = HashMap::new();
+        pop.insert("Firefox".to_string(), 0);
+        pop.insert("Inkscape".to_string(), 1000); // wildly popular but only fuzzy-matches "f"
+        let app = App::for_test(test_config(), pop);
 
-        let paths = App::get_desktop_app_paths();
+        let firefox = app.matches_search("Firefox", "f").unwrap();
+        let inkscape = app.matches_search("Inkscape", "f").unwrap_or(0);
+        assert!(
+            firefox > inkscape,
+            "Prefix match Firefox ({}) must beat fuzzy match Inkscape ({})",
+            firefox,
+            inkscape
+        );
+    }
 
-        // Should fall back to defaults just like when unset
-        assert_eq!(paths[0], "/home/test/.local/share/applications");
-        assert_eq!(paths[1], "/usr/local/share/applications");
-        assert_eq!(paths[2], "/usr/share/applications");
+    #[test]
+    fn empty_query_default_view_puts_top_n_first() {
+        let mut pop = HashMap::new();
+        pop.insert("Firefox".to_string(), 50);
+        pop.insert("Vim".to_string(), 30);
+        let mut app = App::for_test(test_config(), pop);
+        app.apps = vec![
+            AppEntry { name: "Aaa".into(), category: "Util".into(), exec: "a".into(), terminal: false },
+            AppEntry { name: "Vim".into(), category: "Util".into(), exec: "vim".into(), terminal: false },
+            AppEntry { name: "Firefox".into(), category: "Net".into(), exec: "firefox".into(), terminal: false },
+            AppEntry { name: "Zzz".into(), category: "Util".into(), exec: "z".into(), terminal: false },
+        ];
+
+        let visible = app.visible_apps();
+        let names: Vec<&str> = visible.iter().map(|a| a.name.as_str()).collect();
+        // Top 2 by popularity first, then the rest in original order.
+        assert_eq!(names[0], "Firefox");
+        assert_eq!(names[1], "Vim");
+        assert!(names[2..].contains(&"Aaa"));
+        assert!(names[2..].contains(&"Zzz"));
     }
 }
