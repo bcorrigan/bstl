@@ -14,6 +14,7 @@ pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, confi
         app.focus,
         config,
     );
+    app.search_rect = Some(search_area);
     
     let (categories_area, apps_area) = layout::horizontal_split(content_area);
     let query_lower = app.query().to_lowercase();
@@ -94,17 +95,30 @@ pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, confi
         display_idx,
         app.focus == Focus::Categories,
         config,
+        &mut app.categories_list_state,
     );
-    
+    app.categories_rect = Some(categories_area);
+
     let app_names: Vec<String> = apps_to_show.iter().map(|a| a.name.clone()).collect();
     let selected_index_in_apps = if apps_to_show.is_empty() { 0 } else { app.selected_app };
+    let description = apps_to_show
+        .get(selected_index_in_apps)
+        .map(|a| a.comment.clone())
+        .unwrap_or_default();
+
+    let (apps_list_area, desc_area) = layout::apps_with_description_split(apps_area);
+
     layout::render_list(
         f,
-        apps_area,
+        apps_list_area,
         " Apps ",
         &app_names,
         selected_index_in_apps,
         app.focus == Focus::Apps,
         config,
+        &mut app.apps_list_state,
     );
+    app.apps_rect = Some(apps_list_area);
+
+    layout::render_description(f, desc_area, &description, config);
 }

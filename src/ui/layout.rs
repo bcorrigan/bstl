@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Layout, Constraint, Direction, Rect},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     style::{Style, Color},
 };
 use tui_input::Input;
@@ -34,6 +34,34 @@ pub fn horizontal_split(area: Rect) -> (Rect, Rect) {
         .constraints([Constraint::Min(20), Constraint::Percentage(70)])
         .split(area);
     (chunks[0], chunks[1])
+}
+
+/// Split a region into a tall apps list (80%) on top and a short description
+/// pane (20%) at the bottom.
+pub fn apps_with_description_split(area: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .split(area);
+    (chunks[0], chunks[1])
+}
+
+pub fn render_description(
+    f: &mut Frame,
+    area: Rect,
+    text: &str,
+    config: &BstlConfig,
+) {
+    let border_color = LauncherTheme::parse_color(&config.colors.border);
+    let block = Block::default()
+        .title(" Description ")
+        .borders(Borders::ALL)
+        .border_type(LauncherTheme::parse_border_type(&config.colors.border_style))
+        .border_style(Style::default().fg(border_color));
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: true });
+    f.render_widget(paragraph, area);
 }
 
 pub fn render_search_bar(
@@ -103,11 +131,11 @@ pub fn render_list(
     selected: usize,
     focus_on_title: bool,
     config: &BstlConfig,
+    state: &mut ListState,
 ) {
-    let mut state = ListState::default();
     let sel = if selected >= items.len() { 0 } else { selected };
     state.select(Some(sel));
-    
+
     let border_color = if focus_on_title {
         LauncherTheme::parse_color(&config.colors.focus)
     } else {
@@ -139,6 +167,6 @@ pub fn render_list(
         .block(block)
         .highlight_style(highlight_style)
         .highlight_symbol("");
-    
-    f.render_stateful_widget(list, area, &mut state);
+
+    f.render_stateful_widget(list, area, state);
 }

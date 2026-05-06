@@ -1,4 +1,5 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use crate::app::{App, Focus, Mode};
 use eyre::Result;
 use tui_input::backend::crossterm::EventHandler;
@@ -296,7 +297,7 @@ fn count_filtered_apps_in_current_category(app: &App) -> usize {
                 None => return 0,
             };
             let query = app.query();
-            
+
             if cat_name == "Recent" {
                 app.recent_apps.iter()
                     .filter_map(|recent_name| {
@@ -312,4 +313,192 @@ fn count_filtered_apps_in_current_category(app: &App) -> usize {
             }
         }
     }
+}
+
+/// Map a screen click coordinate inside `rect` to a list-content row index
+/// (0-based, excluding the top/bottom borders). Returns None if the click
+/// landed on the border or outside the rect.
+fn click_row_in_list(rect: Rect, col: u16, row: u16) -> Option<usize> {
+    if col < rect.x || col >= rect.x + rect.width {
+        return None;
+    }
+    if row <= rect.y || row + 1 >= rect.y + rect.height {
+        return None;
+    }
+    Some((row - rect.y - 1) as usize)
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
+}
+
+/// Translate a click on the apps list into selected_app + focus. Launches if
+/// the user clicked on the already-selected row. Returns Ok(true) on launch.
+fn click_apps_list(app: &mut App, rect: Rect, col: u16, row: u16) -> Result<bool> {
+    let Some(visible_row) = click_row_in_list(rect, col, row) else {
+        return Ok(false);
+    };
+    let count = count_filtered_apps_in_current_category(app);
+    if count == 0 {
+        return Ok(false);
+    }
+    let offset = app.apps_list_state.offset();
+    let target = offset + visible_row;
+    if target >= count {
+        return Ok(false);
+    }
+    let already_selected = app.focus == Focus::Apps && app.selected_app == target;
+    app.focus = Focus::Apps;
+    app.selected_app = target;
+
+    if already_selected {
+        if let Some(entry) = get_selected_app(app) {
+            app.app_to_launch = Some(entry.exec.clone());
+            app.should_quit = true;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn click_categories_list(app: &mut App, rect: Rect, col: u16, row: u16) {
+    let Some(visible_row) = click_row_in_list(rect, col, row) else {
+        return;
+    };
+    let matching = get_matching_category_indices(app);
+    if matching.is_empty() {
+        return;
+    }
+    let offset = app.categories_list_state.offset();
+    let display_idx = offset + visible_row;
+    if display_idx >= matching.len() {
+        return;
+    }
+    let new_category = matching[display_idx];
+    app.focus = Focus::Categories;
+    if app.selected_category != new_category {
+        app.selected_category = new_category;
+        app.selected_app = 0;
+    }
+}
+
+fn scroll_in_apps(app: &mut App, delta: i32) {
+    app.focus = Focus::Apps;
+    if delta < 0 {
+        for _ in 0..(-delta) {
+            navigate_up_apps(app);
+        }
+    } else {
+        for _ in 0..delta {
+            navigate_down_apps(app);
+        }
+    }
+}
+
+fn scroll_in_categories(app: &mut App, delta: i32) {
+    if app.mode != Mode::DualPane {
+        return;
+    }
+    app.focus = Focus::Categories;
+    if delta < 0 {
+        for _ in 0..(-delta) {
+            navigate_up_categories(app);
+        }
+    } else {
+        for _ in 0..delta {
+            navigate_down_categories(app);
+        }
+    }
+}
+
+fn navigate_up_apps(app: &mut App) {
+    if app.selected_app > 0 {
+        app.selected_app -= 1;
+    }
+}
+
+fn navigate_down_apps(app: &mut App) {
+    let count = count_filtered_apps_in_current_category(app);
+    if count > 0 && app.selected_app + 1 < count {
+        app.selected_app += 1;
+    }
+}
+
+fn navigate_up_categories(app: &mut App) {
+    let matching = get_matching_category_indices(app);
+    if let Some(pos) = matching.iter().position(|&i| i == app.selected_category) {
+        if pos > 0 {
+            app.selected_category = matching[pos - 1];
+            app.selected_app = 0;
+        }
+    }
+}
+
+fn navigate_down_categories(app: &mut App) {
+    let matching = get_matching_category_indices(app);
+    if let Some(pos) = matching.iter().position(|&i| i == app.selected_category) {
+        if pos + 1 < matching.len() {
+            app.selected_category = matching[pos + 1];
+            app.selected_app = 0;
+        }
+    }
+}
+
+pub fn handle_mouse(app: &mut App, ev: MouseEvent) -> Result<bool> {
+    let (col, row) = (ev.column, ev.row);
+
+    match ev.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(rect) = app.apps_rect {
+                if rect_contains(rect, col, row) {
+                    return click_apps_list(app, rect, col, row);
+                }
+            }
+            if let Some(rect) = app.categories_rect {
+                if rect_contains(rect, col, row) {
+                    click_categories_list(app, rect, col, row);
+                    return Ok(false);
+                }
+            }
+            if let Some(rect) = app.search_rect {
+                if rect_contains(rect, col, row) {
+                    app.focus = Focus::Search;
+                    return Ok(false);
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if let Some(rect) = app.categories_rect {
+                if rect_contains(rect, col, row) {
+                    scroll_in_categories(app, -3);
+                    return Ok(false);
+                }
+            }
+            if let Some(rect) = app.apps_rect {
+                if rect_contains(rect, col, row) {
+                    scroll_in_apps(app, -3);
+                    return Ok(false);
+                }
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if let Some(rect) = app.categories_rect {
+                if rect_contains(rect, col, row) {
+                    scroll_in_categories(app, 3);
+                    return Ok(false);
+                }
+            }
+            if let Some(rect) = app.apps_rect {
+                if rect_contains(rect, col, row) {
+                    scroll_in_apps(app, 3);
+                    return Ok(false);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
 }

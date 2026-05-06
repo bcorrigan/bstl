@@ -8,8 +8,9 @@ use eyre::{Context, Result};
 use rusqlite::{Connection, params};
 
 use crate::app::AppEntry;
+use crate::menu;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 3;
 
 pub struct Storage {
     conn: Connection,
@@ -18,9 +19,10 @@ pub struct Storage {
 #[derive(Debug, Clone)]
 pub struct CachedApp {
     pub name: String,
-    pub category: String,
+    pub raw_categories: String,
     pub exec: String,
     pub terminal: bool,
+    pub comment: String,
 }
 
 impl Storage {
@@ -76,12 +78,12 @@ impl Storage {
             tx.execute_batch(
                 r#"
                 CREATE TABLE apps (
-                    name        TEXT PRIMARY KEY,
-                    exec        TEXT NOT NULL,
-                    category    TEXT NOT NULL,
-                    terminal    INTEGER NOT NULL,
-                    source_path TEXT NOT NULL,
-                    file_mtime  INTEGER NOT NULL
+                    name           TEXT PRIMARY KEY,
+                    exec           TEXT NOT NULL,
+                    raw_categories TEXT NOT NULL,
+                    terminal       INTEGER NOT NULL,
+                    source_path    TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL
                 );
                 CREATE INDEX apps_source ON apps(source_path);
 
@@ -97,6 +99,61 @@ impl Storage {
                 );
                 CREATE INDEX launches_name_ts ON launches(name, ts);
                 CREATE INDEX launches_ts      ON launches(ts);
+                "#,
+            )?;
+        }
+        if current < 2 {
+            // v1 stored a single derived `category` column. v2 stores the
+            // raw `Categories=` string instead so XDG menu fragments can be
+            // applied at load time without re-parsing .desktop files.
+            // Drop the apps cache entirely (and the dir-mtime cache that
+            // would otherwise tell us "you've already scanned this") so
+            // refresh_app_cache rebuilds with the new shape on next launch.
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS apps;
+                DROP TABLE IF EXISTS scan_meta;
+                CREATE TABLE apps (
+                    name           TEXT PRIMARY KEY,
+                    exec           TEXT NOT NULL,
+                    raw_categories TEXT NOT NULL,
+                    terminal       INTEGER NOT NULL,
+                    source_path    TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL
+                );
+                CREATE INDEX apps_source ON apps(source_path);
+                CREATE TABLE scan_meta (
+                    directory  TEXT PRIMARY KEY,
+                    dir_mtime  INTEGER NOT NULL,
+                    scanned_at INTEGER NOT NULL
+                );
+                "#,
+            )?;
+        }
+        if current < 3 {
+            // v3 adds a `comment` column sourced from the .desktop Comment=
+            // field, used to populate the description pane. Drop the cache
+            // (same as v1→v2) so refresh_app_cache repopulates with the new
+            // shape on next launch.
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS apps;
+                DROP TABLE IF EXISTS scan_meta;
+                CREATE TABLE apps (
+                    name           TEXT PRIMARY KEY,
+                    exec           TEXT NOT NULL,
+                    raw_categories TEXT NOT NULL,
+                    terminal       INTEGER NOT NULL,
+                    comment        TEXT NOT NULL DEFAULT '',
+                    source_path    TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL
+                );
+                CREATE INDEX apps_source ON apps(source_path);
+                CREATE TABLE scan_meta (
+                    directory  TEXT PRIMARY KEY,
+                    dir_mtime  INTEGER NOT NULL,
+                    scanned_at INTEGER NOT NULL
+                );
                 "#,
             )?;
         }
@@ -229,13 +286,14 @@ impl Storage {
                     // files declare the same Name=. Last-writer wins, matching the old
                     // behavior loosely (the old code skipped duplicates).
                     tx.execute(
-                        "INSERT OR REPLACE INTO apps(name, exec, category, terminal, source_path, file_mtime)
-                         VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO apps(name, exec, raw_categories, terminal, comment, source_path, file_mtime)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)",
                         params![
                             app.name,
                             app.exec,
-                            app.category,
+                            app.raw_categories,
                             app.terminal as i32,
+                            app.comment,
                             path_str,
                             file_mtime,
                         ],
@@ -283,21 +341,35 @@ impl Storage {
         Ok(())
     }
 
-    pub fn load_apps(&self) -> Result<Vec<AppEntry>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name, exec, category, terminal FROM apps ORDER BY name COLLATE NOCASE")?;
+    /// Load all cached apps, deriving each app's display category by:
+    /// 1. checking the user's XDG menu fragment overrides (first matching
+    ///    `Categories=` token wins), then
+    /// 2. falling back to the hardcoded bucket logic in `group_category`.
+    pub fn load_apps(&self, overrides: &HashMap<String, String>) -> Result<Vec<AppEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, exec, raw_categories, terminal, comment FROM apps ORDER BY name COLLATE NOCASE",
+        )?;
         let rows = stmt.query_map([], |r| {
-            Ok(AppEntry {
-                name: r.get(0)?,
-                exec: r.get(1)?,
-                category: r.get(2)?,
-                terminal: r.get::<_, i32>(3)? != 0,
-            })
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i32>(3)? != 0,
+                r.get::<_, String>(4)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let (name, exec, raw_cats, terminal, comment) = r?;
+            let category = menu::override_category(&raw_cats, overrides)
+                .unwrap_or_else(|| group_category(&raw_cats, &name));
+            out.push(AppEntry {
+                name,
+                category,
+                exec,
+                terminal,
+                comment,
+            });
         }
         Ok(out)
     }
@@ -362,6 +434,7 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
     let mut generic_name: Option<String> = None;
     let mut exec: Option<String> = None;
     let mut categories: Option<String> = None;
+    let mut comment: Option<String> = None;
     let mut no_display = false;
     let mut terminal = false;
     let mut only_show_in: Option<Vec<String>> = None;
@@ -390,6 +463,7 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
             "GenericName" => generic_name = Some(value.to_string()),
             "Exec" => exec = Some(value.to_string()),
             "Categories" => categories = Some(value.to_string()),
+            "Comment" => comment = Some(value.to_string()),
             "NoDisplay" => no_display = value == "true",
             "Hidden" => no_display = no_display || value == "true",
             "Terminal" => terminal = value == "true",
@@ -441,14 +515,15 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
         }
     }
 
-    let category = group_category(categories.as_deref().unwrap_or(""), &name);
+    let raw_categories = categories.unwrap_or_default();
     let exec_clean = clean_exec(&exec_raw);
 
     Some(CachedApp {
         name,
-        category,
+        raw_categories,
         exec: exec_clean,
         terminal,
+        comment: comment.unwrap_or_default(),
     })
 }
 
@@ -582,6 +657,41 @@ mod tests {
     fn clean_exec_strips_field_codes() {
         assert_eq!(clean_exec("firefox %u"), "firefox");
         assert_eq!(clean_exec("vlc --foo %F"), "vlc --foo");
+    }
+
+    #[test]
+    fn parse_desktop_file_extracts_comment() {
+        let dir = tempdir_with_prefix("bstl_parse_comment");
+        let path = dir.join("foo.desktop");
+        fs::write(
+            &path,
+            "[Desktop Entry]\nName=Foo\nExec=foo\nComment=A handy little tool\n",
+        )
+        .unwrap();
+        let parsed = parse_desktop_file(&path, &[]).expect("should parse");
+        assert_eq!(parsed.comment, "A handy little tool");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_desktop_file_missing_comment_is_empty() {
+        let dir = tempdir_with_prefix("bstl_parse_no_comment");
+        let path = dir.join("bar.desktop");
+        fs::write(&path, "[Desktop Entry]\nName=Bar\nExec=bar\n").unwrap();
+        let parsed = parse_desktop_file(&path, &[]).expect("should parse");
+        assert_eq!(parsed.comment, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn tempdir_with_prefix(prefix: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, pid, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     // The xdg_application_dirs tests mutate process-wide env vars and must run

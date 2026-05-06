@@ -20,3 +20,4 @@ ratatui = "0.30.0"
 rune-cfg = "0.4.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+quick-xml = "0.36"

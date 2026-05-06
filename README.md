@@ -2,6 +2,8 @@
 
 <p align="center"><b>Bazza's Simple TUI Launcher</b> — a fast, keyboard-driven application launcher for the terminal.</p>
 
+<p align="center"><img src="bstl.png" alt="bstl screenshot"/></p>
+
 > **Fork notice.** `bstl` is a fork of [dstl](https://github.com/saltnpepper97/dstl) ("Dustin's Simple TUI Launcher") by saltnpepper97. The upstream project is no longer actively maintained and this fork has diverged substantially in behaviour, internal layout, and configuration. The original MIT licence and copyright are preserved (see `LICENSE`).
 
 ## Highlights
@@ -9,6 +11,8 @@
 - 🏢 **Sway integration** — execution via `swayexec` IPC (avoids the launcher being parent of the launched process), and smart fullscreen handling (un-fullscreens on launch, restores on cancel).
 - 🔄 **Toggle-able** — a second invocation sends a quit signal over a Unix socket, so a single keybinding opens and closes the launcher.
 - ⌨️ **Stateless UX** — typing always goes to search, arrow keys always navigate. No focus modes to remember.
+- 🖱️ **Mouse support** — click to select / launch, scroll wheel to navigate the list under the cursor.
+- 📝 **Description pane** — the `Comment=` field from each `.desktop` entry is shown below the apps list so you can see what an unfamiliar app actually does before launching it.
 - 🎹 **Emacs keybindings** — GNU Readline-style shortcuts (`Ctrl-a`, `Ctrl-e`, `Ctrl-k`, `Ctrl-u`, …).
 - 📊 **Launch history & popularity ranking**  — every launch is recorded; frequently-used apps win search ties and lead the default view.
 - 🗄️ **SQLite-backed cache** — `.desktop` files are parsed once and cached; an mtime check on each XDG directory makes the steady-state startup near-free.
@@ -112,6 +116,43 @@ On startup `bstl` walks `XDG_DATA_HOME` and `XDG_DATA_DIRS` for `.desktop` entri
 
 The cache lives in the same SQLite database as the launch history. There is no manual refresh command; installing or removing a `.desktop` file always updates the parent directory's mtime, which is what `bstl` uses to decide what to re-scan.
 
+## Custom categories (XDG menu fragments)
+
+The dual-pane left list ("Recent / Utilities / Development / …") starts from a small set of hardcoded buckets, then tacks on any extra menus you've defined as XDG menu fragments. To add a "My Scripts" menu, drop three files in your home dir:
+
+```
+# ~/.local/share/applications/myscript.desktop
+[Desktop Entry]
+Type=Application
+Name=My Script
+Exec=/home/me/bin/myscript
+Categories=X-MyScripts;
+```
+
+```
+# ~/.local/share/desktop-directories/my-scripts.directory
+[Desktop Entry]
+Type=Directory
+Name=My Scripts
+```
+
+```xml
+<!-- ~/.config/menus/applications-merged/my-scripts.menu -->
+<Menu>
+  <Menu>
+    <Name>My Scripts</Name>
+    <Directory>my-scripts.directory</Directory>
+    <Include>
+      <And>
+        <Category>X-MyScripts</Category>
+      </And>
+    </Include>
+  </Menu>
+</Menu>
+```
+
+The next launch of `bstl` will pick up the fragment, route any `.desktop` with `Categories=X-MyScripts;` under "My Scripts", and append "My Scripts" after the hardcoded buckets in the left pane. Multiple fragments are supported; the first matching `Categories=` token wins, and unmatched apps fall back to the hardcoded bucket logic. Only user fragments under `$XDG_CONFIG_HOME/menus/applications-merged/` are read — system fragments under `/etc/xdg` are intentionally ignored so the stock buckets remain authoritative for distro-shipped apps.
+
 ## Sway integration
 
 When `sway = true` (or `--sway` on the command line):
@@ -174,14 +215,18 @@ This is what makes the single-keybinding open/close behaviour work — the same 
 - `Ctrl-d` / `Delete` — delete next char
 - `Ctrl-h` / `Backspace` — delete previous char
 
+## Mouse
+
+Click and scroll-wheel work as you'd expect. Note that with mouse capture enabled, terminal-native text selection (shift-drag in many terminals) is intercepted by the launcher.
+
 ## View modes
 
 ### Single-pane
-Shows all applications in one list with fuzzy search filtering. With `recent_first = true`, the top-N most-launched apps lead the default view.
+Shows all applications in one list with fuzzy search filtering. With `recent_first = true`, the top-N most-launched apps lead the default view. The selected app's `Comment=` (from its `.desktop` file) is shown in a small description pane below the list.
 
 ### Dual-pane
 - **Left pane**: categories (with a synthetic "Recent" entry on top showing the most recently launched apps)
-- **Right pane**: applications in the selected category
+- **Right pane**: applications in the selected category, with a description pane underneath showing the selected app's `Comment=`.
 - Search filters both panes simultaneously
 - The currently active list is highlighted with the `focus` colour; the inactive list uses `unfocused`.
 

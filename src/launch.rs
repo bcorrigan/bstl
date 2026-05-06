@@ -3,6 +3,43 @@ use std::os::unix::process::CommandExt;
 use crate::app::AppEntry;
 use crate::config::BstlConfig;
 
+/// Reconstruct a `Command` as a single string suitable for sway's `exec` IPC.
+///
+/// Sway's command parser treats `,` and `;` as command separators and splits
+/// on whitespace, so any argument containing those (or quote/backslash chars)
+/// must be wrapped in double quotes with `\` and `"` escaped.
+pub fn build_sway_exec_string(command: &Command) -> String {
+    let prog = quote_arg_for_sway(&command.get_program().to_string_lossy());
+    let args = command
+        .get_args()
+        .map(|a| quote_arg_for_sway(&a.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if args.is_empty() {
+        prog
+    } else {
+        format!("{} {}", prog, args)
+    }
+}
+
+fn quote_arg_for_sway(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, ',' | ';' | '"' | '\\'));
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    let escaped: String = arg
+        .chars()
+        .flat_map(|c| match c {
+            '\\' | '"' => vec!['\\', c],
+            other => vec![other],
+        })
+        .collect();
+    format!("\"{}\"", escaped)
+}
+
 pub fn build_command(entry: &AppEntry, config: &BstlConfig) -> Command {
     let terminal = &config.terminal;
 
@@ -95,6 +132,7 @@ mod tests {
             category: "CLI".to_string(),
             exec: "vim".to_string(),
             terminal: true,
+            comment: String::new(),
         };
         let config = make_config("alacritty");
         let cmd = build_command(&entry, &config);
@@ -112,6 +150,7 @@ mod tests {
             category: "CLI".to_string(),
             exec: "vim".to_string(),
             terminal: true,
+            comment: String::new(),
         };
         let config = make_config("wezterm start");
         let cmd = build_command(&entry, &config);
@@ -129,5 +168,40 @@ mod tests {
         // Let's rely on manual inspection if this fails or just weak assertion.
         
         // Actually, if I run `cargo test`, I'll see if it fails.
+    }
+
+    #[test]
+    fn sway_exec_string_quotes_comma_path() {
+        // Regression: a comma in the Exec path used to leak through unquoted,
+        // which caused sway IPC to split on it and silently drop the launch.
+        let entry = AppEntry {
+            name: "Full Charge".to_string(),
+            category: "My Scripts".to_string(),
+            exec: "/home/bc/bin/,fullcharge".to_string(),
+            terminal: false,
+            comment: String::new(),
+        };
+        let cmd = build_command(&entry, &make_config("wezterm"));
+        let s = build_sway_exec_string(&cmd);
+        assert_eq!(s, r#"sh -c "/home/bc/bin/,fullcharge""#);
+    }
+
+    #[test]
+    fn sway_exec_string_quotes_semicolon_and_whitespace() {
+        assert_eq!(quote_arg_for_sway("a;b"), r#""a;b""#);
+        assert_eq!(quote_arg_for_sway("a b"), r#""a b""#);
+        assert_eq!(quote_arg_for_sway("a,b"), r#""a,b""#);
+    }
+
+    #[test]
+    fn sway_exec_string_escapes_quotes_and_backslashes() {
+        assert_eq!(quote_arg_for_sway(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quote_arg_for_sway(r"a\b"), r#""a\\b""#);
+    }
+
+    #[test]
+    fn sway_exec_string_leaves_plain_args_alone() {
+        assert_eq!(quote_arg_for_sway("plain"), "plain");
+        assert_eq!(quote_arg_for_sway("/usr/bin/foo"), "/usr/bin/foo");
     }
 }

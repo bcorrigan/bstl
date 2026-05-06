@@ -7,6 +7,8 @@ use crate::config::BstlConfig;
 use crate::storage::Storage;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use ratatui::layout::Rect;
+use ratatui::widgets::ListState;
 use tui_input::Input;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,12 @@ pub struct App {
     pub config: BstlConfig,
     pub popularity: HashMap<String, u32>,
     pub storage: Rc<Storage>,
+    pub category_overrides: HashMap<String, String>,
+    pub apps_list_state: ListState,
+    pub categories_list_state: ListState,
+    pub apps_rect: Option<Rect>,
+    pub categories_rect: Option<Rect>,
+    pub search_rect: Option<Rect>,
     fuzzy_matcher: SkimMatcherV2,
 }
 
@@ -67,6 +75,12 @@ impl Clone for App {
             config: self.config.clone(),
             popularity: self.popularity.clone(),
             storage: Rc::clone(&self.storage),
+            category_overrides: self.category_overrides.clone(),
+            apps_list_state: self.apps_list_state.clone(),
+            categories_list_state: self.categories_list_state.clone(),
+            apps_rect: self.apps_rect,
+            categories_rect: self.categories_rect,
+            search_rect: self.search_rect,
             fuzzy_matcher: SkimMatcherV2::default(),
         }
     }
@@ -102,6 +116,7 @@ pub struct AppEntry {
     pub category: String,
     pub exec: String,
     pub terminal: bool,
+    pub comment: String,
 }
 
 impl AppEntry {
@@ -123,14 +138,15 @@ impl App {
         start_mode: Mode,
         config: &BstlConfig,
         storage: Rc<Storage>,
+        category_overrides: HashMap<String, String>,
     ) -> Self {
         let (categories, apps, mode, focus) = match start_mode {
             Mode::SinglePane => {
-                let (cats, apps) = Self::load_for_mode(single_pane_mode, &storage);
+                let (cats, apps) = Self::load_for_mode(single_pane_mode, &storage, &category_overrides);
                 (cats, apps, Mode::SinglePane, Focus::Apps)
             }
             Mode::DualPane => {
-                let (cats, apps) = Self::load_desktop_apps(&storage);
+                let (cats, apps) = Self::load_desktop_apps(&storage, &category_overrides);
                 (cats, apps, Mode::DualPane, Focus::Categories)
             }
         };
@@ -159,6 +175,12 @@ impl App {
             config: config.clone(),
             popularity,
             storage,
+            category_overrides,
+            apps_list_state: ListState::default(),
+            categories_list_state: ListState::default(),
+            apps_rect: None,
+            categories_rect: None,
+            search_rect: None,
             fuzzy_matcher: SkimMatcherV2::default(),
         }
     }
@@ -263,7 +285,7 @@ impl App {
     pub fn toggle_mode(&mut self) {
         match self.mode {
             Mode::SinglePane => {
-                let (categories, apps) = Self::load_desktop_apps(&self.storage);
+                let (categories, apps) = Self::load_desktop_apps(&self.storage, &self.category_overrides);
                 self.categories = categories;
                 self.apps = apps;
                 self.mode = Mode::DualPane;
@@ -272,7 +294,11 @@ impl App {
                 self.focus = Focus::Categories;
             }
             Mode::DualPane => {
-                let (categories, apps) = Self::load_for_mode(self.single_pane_mode, &self.storage);
+                let (categories, apps) = Self::load_for_mode(
+                    self.single_pane_mode,
+                    &self.storage,
+                    &self.category_overrides,
+                );
                 self.categories = categories;
                 self.apps = apps;
                 self.mode = Mode::SinglePane;
@@ -296,7 +322,11 @@ impl App {
 
         // Always switch to SinglePane to show the new list
         self.mode = Mode::SinglePane;
-        let (categories, apps) = Self::load_for_mode(self.single_pane_mode, &self.storage);
+        let (categories, apps) = Self::load_for_mode(
+            self.single_pane_mode,
+            &self.storage,
+            &self.category_overrides,
+        );
         self.categories = categories;
         self.apps = apps;
         self.selected_app = 0;
@@ -336,10 +366,14 @@ impl App {
     }
 
     /// Load apps based on the single pane mode
-    fn load_for_mode(mode: SinglePaneMode, storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
+    fn load_for_mode(
+        mode: SinglePaneMode,
+        storage: &Storage,
+        overrides: &HashMap<String, String>,
+    ) -> (Vec<String>, Vec<AppEntry>) {
         let (categories, mut apps) = match mode {
-            SinglePaneMode::DesktopApps => Self::load_desktop_apps(storage),
-            SinglePaneMode::Dmenu => Self::load_from_path("/usr/bin", storage),
+            SinglePaneMode::DesktopApps => Self::load_desktop_apps(storage, overrides),
+            SinglePaneMode::Dmenu => Self::load_from_path("/usr/bin", storage, overrides),
         };
 
         // Sort apps alphabetically for single pane mode
@@ -349,8 +383,14 @@ impl App {
     }
 
     /// Load .desktop apps from the storage cache and derive the category list.
-    fn load_desktop_apps(storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
-        let apps = storage.load_apps().unwrap_or_default();
+    /// Hardcoded buckets keep their fixed order at the top of the list (so
+    /// stock apps land where users expect them); any extra categories
+    /// introduced by XDG menu fragments are appended after, sorted.
+    fn load_desktop_apps(
+        storage: &Storage,
+        overrides: &HashMap<String, String>,
+    ) -> (Vec<String>, Vec<AppEntry>) {
+        let apps = storage.load_apps(overrides).unwrap_or_default();
 
         let mut category_set: HashSet<String> = HashSet::new();
         for a in &apps {
@@ -362,21 +402,34 @@ impl App {
             "Utilities", "Development", "Network", "Audio/Video", "Graphics",
             "System", "Office", "Games", "Education", "Settings",
         ];
+        let known: HashSet<&str> = category_order.iter().copied().collect();
         categories.extend(
             category_order
-                .into_iter()
-                .filter(|c| category_set.contains(*c))
+                .iter()
+                .filter(|c| category_set.contains(**c))
                 .map(|s| s.to_string()),
         );
+
+        let mut extras: Vec<String> = category_set
+            .iter()
+            .filter(|c| !known.contains(c.as_str()))
+            .cloned()
+            .collect();
+        extras.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        categories.extend(extras);
 
         (categories, apps)
     }
 
     /// Load executables from a directory (dmenu style). Determines GUI status
     /// from the cached desktop apps so we don't re-scan .desktop files.
-    fn load_from_path<P: AsRef<Path>>(path: P, storage: &Storage) -> (Vec<String>, Vec<AppEntry>) {
+    fn load_from_path<P: AsRef<Path>>(
+        path: P,
+        storage: &Storage,
+        overrides: &HashMap<String, String>,
+    ) -> (Vec<String>, Vec<AppEntry>) {
         let mut apps = Vec::new();
-        let gui_bins = Self::gui_binaries_from_cache(storage);
+        let gui_bins = Self::gui_binaries_from_cache(storage, overrides);
 
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
@@ -389,6 +442,7 @@ impl App {
                             category: "CLI".to_string(),
                             exec: name.to_string(),
                             terminal: !is_gui,
+                            comment: String::new(),
                         });
                     }
                 }
@@ -417,15 +471,24 @@ impl App {
             config,
             popularity,
             storage: Rc::new(Storage::in_memory()),
+            category_overrides: HashMap::new(),
+            apps_list_state: ListState::default(),
+            categories_list_state: ListState::default(),
+            apps_rect: None,
+            categories_rect: None,
+            search_rect: None,
             fuzzy_matcher: SkimMatcherV2::default(),
         }
     }
 
     /// Derive the set of known GUI binary names from the cached app list:
     /// any entry where Terminal=false contributes its first exec token.
-    fn gui_binaries_from_cache(storage: &Storage) -> HashSet<String> {
+    fn gui_binaries_from_cache(
+        storage: &Storage,
+        overrides: &HashMap<String, String>,
+    ) -> HashSet<String> {
         let mut gui_bins: HashSet<String> = HashSet::new();
-        let cached = storage.load_apps().unwrap_or_default();
+        let cached = storage.load_apps(overrides).unwrap_or_default();
         for app in cached {
             if app.terminal {
                 continue;
@@ -519,10 +582,10 @@ mod tests {
         pop.insert("Vim".to_string(), 30);
         let mut app = App::for_test(test_config(), pop);
         app.apps = vec![
-            AppEntry { name: "Aaa".into(), category: "Util".into(), exec: "a".into(), terminal: false },
-            AppEntry { name: "Vim".into(), category: "Util".into(), exec: "vim".into(), terminal: false },
-            AppEntry { name: "Firefox".into(), category: "Net".into(), exec: "firefox".into(), terminal: false },
-            AppEntry { name: "Zzz".into(), category: "Util".into(), exec: "z".into(), terminal: false },
+            AppEntry { name: "Aaa".into(), category: "Util".into(), exec: "a".into(), terminal: false, comment: String::new() },
+            AppEntry { name: "Vim".into(), category: "Util".into(), exec: "vim".into(), terminal: false, comment: String::new() },
+            AppEntry { name: "Firefox".into(), category: "Net".into(), exec: "firefox".into(), terminal: false, comment: String::new() },
+            AppEntry { name: "Zzz".into(), category: "Util".into(), exec: "z".into(), terminal: false, comment: String::new() },
         ];
 
         let visible = app.visible_apps();

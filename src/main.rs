@@ -3,6 +3,7 @@ mod config;
 mod events;
 mod icons;
 mod launch;
+mod menu;
 mod storage;
 mod sway;
 mod ui;
@@ -85,6 +86,11 @@ fn main() -> Result<()> {
     storage.refresh_app_cache(&dirs, &desktops)?;
     let storage = Rc::new(storage);
 
+    // User-defined XDG menu fragments override the hardcoded category
+    // buckets, so a `Categories=X-MyScripts;` entry can be routed under a
+    // "My Scripts" menu instead of falling through to "Utilities".
+    let category_overrides = menu::load_category_overrides();
+
     let single_pane_mode = if cfg.dmenu {
         SinglePaneMode::Dmenu
     } else {
@@ -96,7 +102,13 @@ fn main() -> Result<()> {
         config::StartMode::Single => Mode::SinglePane,
     };
 
-    let mut app = App::new(single_pane_mode, start_mode, &cfg, Rc::clone(&storage));
+    let mut app = App::new(
+        single_pane_mode,
+        start_mode,
+        &cfg,
+        Rc::clone(&storage),
+        category_overrides,
+    );
 
     let print_only = cfg.print_selection || std::env::args().any(|arg| arg == "--print-selection");
     let sway_mode = cfg.sway || std::env::args().any(|arg| arg == "--sway");
@@ -151,20 +163,7 @@ fn main() -> Result<()> {
                 let full_cmd = if let Some(entry) = app.apps.iter().find(|a| &a.exec == cmd).cloned() {
                     app.add_to_recent(entry.name.clone());
                     let command = crate::launch::build_command(&entry, &app.config);
-                    // Simple reconstruction of command string for sway exec
-                    let prog = command.get_program().to_string_lossy();
-                    let args = command.get_args()
-                        .map(|a| {
-                            let s = a.to_string_lossy();
-                            if s.contains(' ') {
-                                format!("\"{}\"", s)
-                            } else {
-                                s.into_owned()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{} {}", prog, args)
+                    crate::launch::build_sway_exec_string(&command)
                 } else {
                     cmd.clone()
                 };
@@ -342,11 +341,20 @@ where
         }
 
         if event::poll(tick)? {
-            if let Event::Key(key) = event::read()? {
-                last_input = Instant::now();
-                if events::handle_key(app, key)? {
-                    break;
+            match event::read()? {
+                Event::Key(key) => {
+                    last_input = Instant::now();
+                    if events::handle_key(app, key)? {
+                        break;
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    last_input = Instant::now();
+                    if events::handle_mouse(app, mouse)? {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     }
