@@ -1,0 +1,79 @@
+# Bstl - Bazza's Simple TUI Launcher (fork of Dustin Pilgrim's dstl)
+#
+# Drop this file at ~/.config/bstl/bstl.toml. Every field is optional; missing
+# values fall back to the defaults shown below.
+
+# Whether to use dmenu-style fuzzy search mode (PATH executables instead of
+# .desktop apps).
+dmenu = false
+
+# Where the search bar appears: "top" or "bottom".
+search_position = "top"
+
+# Startup mode: "single" or "dual".
+start_mode = "single"
+
+# Automatically refocus the search field when toggling between modes.
+focus_search_on_switch = true
+
+# Sway IPC integration (un-fullscreens on launch, executes via Sway IPC so the
+# launched app isn't a child of the launcher).
+sway = false
+
+# Print the chosen command to stdout instead of executing it (handy for piping
+# into swayexec or similar).
+print_selection = false
+
+# Terminal emulator used for apps that need one. Single word ("alacritty")
+# implies an automatic `-e`; multi-word ("wezterm start") is appended directly.
+terminal = "alacritty"
+
+# Auto-close after this many seconds of inactivity (0 = never).
+timeout = 0
+
+# Cap for the MRU list shown in the dual-pane "Recent" category.
+max_recent_apps = 15
+
+# Empty-query default view leads with the most-launched apps in the configured
+# window before the rest of the alphabetical list.
+recent_first = true
+
+# Number of apps shown at the top of the default view when recent_first = true.
+top_recent_count = 5
+
+# Trailing window (days) used to compute popularity for default-view ranking
+# and search tie-breaking.
+history_window_days = 90
+
+# Multiplier applied to launch counts when adding a popularity bonus to search
+# scores. Higher = popular apps win ties more decisively.
+popularity_weight = 10
+
+[theme]
+# Border colour of panels (hex: #RGB, #RRGGBB, or #RRGGBBAA).
+border = "#ffffff"
+
+# Highlight colour for the focused element / pane.
+focus = "#ffff00"
+
+# Highlight colour for the inactive (unfocused) pane.
+unfocused = "#808080"
+
+# Colour used to highlight the selected entry in a list.
+highlight = "#0000ff"
+
+# Border style: "plain", "rounded", "thick", "double".
+border_style = "plain"
+
+# Highlight rendering: "background" (coloured bar, black text) or
+# "foreground" (only the text is coloured).
+highlight_type = "background"
+
+# Cursor colour in the search field. Leave unset (or empty) to follow `focus`.
+cursor_color = "#ffff00"
+
+# Cursor shape: "block", "underline", "pipe".
+cursor_shape = "block"
+
+# Cursor blink interval (ms). 0 disables blinking.
+cursor_blink_interval = 0

@@ -152,8 +152,13 @@ fn parse_menu_file(
                 text_buf.clear();
             }
             Event::Text(t) => {
-                if let Ok(s) = t.unescape() {
-                    text_buf.push_str(&s);
+                // 0.39 split decoding (bytes → str) from entity unescaping;
+                // the old `unescape()` did both. Re-create that two-step
+                // equivalent so &amp; / &lt; / etc. in menu names still work.
+                if let Ok(decoded) = t.xml_content() {
+                    if let Ok(unescaped) = quick_xml::escape::unescape(&decoded) {
+                        text_buf.push_str(&unescaped);
+                    }
                 }
             }
             Event::End(e) => {

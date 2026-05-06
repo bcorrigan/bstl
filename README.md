@@ -16,7 +16,7 @@
 - 🎹 **Emacs keybindings** — GNU Readline-style shortcuts (`Ctrl-a`, `Ctrl-e`, `Ctrl-k`, `Ctrl-u`, …).
 - 📊 **Launch history & popularity ranking**  — every launch is recorded; frequently-used apps win search ties and lead the default view.
 - 🗄️ **SQLite-backed cache** — `.desktop` files are parsed once and cached; an mtime check on each XDG directory makes the steady-state startup near-free.
-- 🎨 **Highly themable** — extensive theming via the `.rune` config format with hex colors, border styles, cursor shapes, etc.
+- 🎨 **Highly themable** — extensive theming via a single `bstl.toml` file with hex colours, border styles, cursor shapes, etc.
 
 ## Installation
 
@@ -31,50 +31,46 @@ sudo cp target/release/bstl /usr/local/bin/
 
 ### Migrating from `dstl`
 
-If you previously had `dstl` installed, the first run of `bstl` will:
-- Copy `~/.config/dstl/dstl.rune` → `~/.config/bstl/bstl.rune` (rewriting the top-level `dstl:` document key to `bstl:`). The legacy file is left in place so you can verify and delete it yourself.
-- Move `~/.local/share/dstl/dstl.sqlite` → `~/.local/share/bstl/bstl.sqlite` if the new path doesn't exist (so launch history is preserved).
-- The old `~/.cache/dstl/recent.json` MRU file is read once and folded into the new launches table on first DB creation.
+If you previously had `dstl` installed:
+- Launch history is preserved: `~/.local/share/dstl/dstl.sqlite` is moved to `~/.local/share/bstl/bstl.sqlite` on first run if the new path doesn't exist. The old `~/.cache/dstl/recent.json` MRU file (if present) is folded into the new launches table on first DB creation.
+- The old `dstl.rune` config format is **no longer supported**. `bstl` now uses TOML — copy `examples/bstl.toml` to `~/.config/bstl/bstl.toml` and re-enter your settings. If a `dstl.rune` or `bstl.rune` file is found at startup, `bstl` prints a one-line warning and otherwise ignores it.
 
 ## Configuration
 
 `bstl` looks for configuration in (in order):
-1. `~/.config/bstl/bstl.rune`
-2. `/usr/share/doc/bstl/bstl.rune`
+1. `~/.config/bstl/bstl.toml`
+2. `/usr/share/doc/bstl/bstl.toml`
 
-A complete example lives in `examples/bstl.rune`.
+A complete example lives in `examples/bstl.toml`. Every field is optional — anything you omit falls back to the built-in default — so a one-line `terminal = "wezterm start"` is a perfectly valid config.
 
 ### Minimal example
 
-```rune
-bstl:
-    dmenu = false
-    startup_mode = "single"   # or "dual"
-    search_position = "top"   # or "bottom"
+```toml
+dmenu = false
+search_position = "top"      # or "bottom"
+start_mode = "single"        # or "dual"
 
-    sway = true
-    print_selection = false
-    terminal = "foot"
+sway = true
+print_selection = false
+terminal = "foot"
 
-    # Launch history / popularity (see "Launch history" section below)
-    recent_first = true
-    top_recent_count = 5
-    history_window_days = 90
-    popularity_weight = 10
-    max_recent_apps = 15
+# Launch history / popularity (see "Launch history" section below)
+recent_first = true
+top_recent_count = 5
+history_window_days = 90
+popularity_weight = 10
+max_recent_apps = 15
 
-    theme:
-        border = "#ffffff"
-        focus = "#00ff00"
-        unfocused = "#808080"
-        highlight = "#0000ff"
-        cursor_color = "#00ff00"
-        cursor_shape = "block"          # block | underline | pipe
-        cursor_blink_interval = 500     # ms, 0 to disable
-        border_style = "rounded"        # plain | rounded | thick | double
-        highlight_type = "background"   # background | foreground
-    end
-end
+[theme]
+border = "#ffffff"
+focus = "#00ff00"
+unfocused = "#808080"
+highlight = "#0000ff"
+cursor_color = "#00ff00"
+cursor_shape = "block"          # block | underline | pipe
+cursor_blink_interval = 500     # ms, 0 to disable
+border_style = "rounded"        # plain | rounded | thick | double
+highlight_type = "background"   # background | foreground
 ```
 
 ## Launch history
