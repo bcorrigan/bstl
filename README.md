@@ -156,6 +156,21 @@ When `sway = true` (or `--sway` on the command line):
 2. When you pick an app, executes it via Sway IPC (`exec <cmd>`), which prevents the new app from being a child of the launcher process.
 3. If you cancel (`Esc` / `Ctrl-g`), the original window's fullscreen state is restored.
 
+### Re-applying size after un-fullscreen
+
+There's a subtle ordering problem with the fullscreen handling. The terminal window is created by Sway *before* `bstl` itself runs, so any `for_window` rule (e.g. `resize set 50ppt 50ppt`) fires while the previously-focused app is **still** fullscreen. By the time `bstl` connects to the Sway IPC socket and disables fullscreen, the launcher has already been sized against the wrong workspace dimensions — and `for_window` rules don't re-fire.
+
+To fix this without `bstl` having to know the contents of your `for_window` rule, two opt-in CLI flags let your sway config tell `bstl` what size and selector to re-apply *after* it has un-fullscreened:
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--app-id <name>` | *(unset)* | Sway `app_id` selector for the re-resize command. |
+| `--size <ppt>`    | *(unset)* | Width and height in `ppt` (percent of workspace), applied symmetrically. |
+
+If **both** are passed and a fullscreen window was un-fullscreened, `bstl` issues `[app_id="<name>"] resize set <size> ppt <size> ppt, move position center, focus` over IPC. The trailing `focus` is needed because `fullscreen disable` leaves keyboard focus on the previously-fullscreen window. If either flag is omitted the whole re-resize is skipped — so this is a no-op for setups that don't care.
+
+The values you pass should match your `for_window` rule (yes, this duplicates them — but both live on adjacent lines of your sway config, fully under your control, rather than being baked into the binary).
+
 ### Recipe: Sway + wezterm
 
 A working setup that pops the launcher up as a centred floating window:
@@ -166,7 +181,9 @@ A working setup that pops the launcher up as a centred floating window:
 # Spawn bstl inside a wezterm window, tagged with a known class so the
 # for_window rule below can match it. Toggle on / off with the same keybind
 # (the second press reaches the running instance via /tmp/bstl.sock).
-bindsym $mod+d exec wezterm start --class bstl bstl --sway
+# --app-id / --size mirror the for_window rule so the size is correct even
+# when launched on top of a fullscreen window (see above).
+bindsym $mod+d exec wezterm start --class bstl bstl --sway --app-id=bstl --size=50
 
 # Float the launcher and centre it at half the screen size.
 for_window [app_id="bstl"] floating enable, resize set 50ppt 50ppt, move position center
@@ -175,9 +192,10 @@ for_window [app_id="bstl"] floating enable, resize set 50ppt 50ppt, move positio
 A few things worth noting:
 - `wezterm start --class bstl` sets the Wayland `app_id` to `bstl`, which is what the `for_window` rule keys off.
 - The `--sway` flag tells `bstl` to launch via Sway IPC, so the launched application becomes a sibling of wezterm rather than a child (so closing the wezterm window doesn't kill it). You can also set `sway = true` in the config and drop the flag.
-- If `bstl` isn't on `$PATH`, replace `bstl --sway` with the absolute path (e.g. `/usr/local/bin/bstl --sway`).
+- If you don't care about launching over fullscreen apps, you can drop `--app-id` / `--size`; everything else still works.
+- If `bstl` isn't on `$PATH`, replace `bstl …` with the absolute path (e.g. `/usr/local/bin/bstl …`).
 
-The same pattern works with foot or any other terminal that supports an `app_id`/`--class` flag — just substitute the launcher and update the `for_window` selector.
+The same pattern works with foot or any other terminal that supports an `app_id`/`--class` flag — just substitute the launcher and update the `for_window` selector (and the matching `--app-id`).
 
 ## Toggle behaviour
 

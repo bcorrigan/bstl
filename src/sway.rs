@@ -85,6 +85,12 @@ impl Client {
         Ok(())
     }
 
+    pub fn run_command(&mut self, cmd: &str) -> Result<()> {
+        self.send_message(MessageType::Command, cmd)?;
+        let _resp = self.receive_message()?;
+        Ok(())
+    }
+
     pub fn set_fullscreen(&mut self, enable: bool, node_id: Option<i64>) -> Result<()> {
         let cmd = match (enable, node_id) {
             (true, Some(id)) => format!("[con_id={}] fullscreen enable", id),

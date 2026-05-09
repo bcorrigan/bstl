@@ -112,7 +112,9 @@ fn main() -> Result<()> {
 
     let print_only = cfg.print_selection || std::env::args().any(|arg| arg == "--print-selection");
     let sway_mode = cfg.sway || std::env::args().any(|arg| arg == "--sway");
-    
+    let sway_app_id = arg_value("--app-id");
+    let sway_size = arg_value("--size");
+
     let mut sway_client = if sway_mode {
         sway::Client::connect().ok()
     } else {
@@ -124,6 +126,15 @@ fn main() -> Result<()> {
         if let Ok(Some(id)) = client.get_focused_fullscreen_node_id() {
             fullscreen_window_id = Some(id);
             let _ = client.set_fullscreen(false, Some(id));
+            // The for_window rule sized us against a workspace that still had the
+            // fullscreen container; re-apply now that bars/usable area are restored.
+            // Caller passes --app-id / --size so we don't bake the sway config in.
+            if let (Some(app_id), Some(size)) = (&sway_app_id, &sway_size) {
+                let _ = client.run_command(&format!(
+                    r#"[app_id="{}"] resize set {} ppt {} ppt, move position center, focus"#,
+                    app_id, size, size,
+                ));
+            }
         }
     }
 
@@ -360,6 +371,21 @@ where
     }
 
     Ok(())
+}
+
+/// Read `--name value` or `--name=value` from CLI args.
+fn arg_value(name: &str) -> Option<String> {
+    let prefix = format!("{}=", name);
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == name {
+            return args.next();
+        }
+        if let Some(rest) = a.strip_prefix(&prefix) {
+            return Some(rest.to_string());
+        }
+    }
+    None
 }
 
 fn warmup_icons<B: Backend>(
