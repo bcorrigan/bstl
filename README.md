@@ -171,31 +171,32 @@ If **both** are passed and a fullscreen window was un-fullscreened, `bstl` issue
 
 The values you pass should match your `for_window` rule (yes, this duplicates them — but both live on adjacent lines of your sway config, fully under your control, rather than being baked into the binary).
 
-### Recipe: Sway + wezterm
+### Recipe: Sway + foot
 
 A working setup that pops the launcher up as a centred floating window:
 
 ```
 # ~/.config/sway/config
 
-# Spawn bstl inside a wezterm window, tagged with a known class so the
+# Spawn bstl inside a foot window, tagged with a known app_id so the
 # for_window rule below can match it. Toggle on / off with the same keybind
 # (the second press reaches the running instance via /tmp/bstl.sock).
 # --app-id / --size mirror the for_window rule so the size is correct even
 # when launched on top of a fullscreen window (see above).
-bindsym $mod+d exec wezterm start --class bstl bstl --sway --app-id=bstl --size=50
+bindsym $mod+d exec foot --app-id=bstl bstl --sway --app-id=bstl --size=50
 
 # Float the launcher and centre it at half the screen size.
 for_window [app_id="bstl"] floating enable, resize set 50ppt 50ppt, move position center
 ```
 
 A few things worth noting:
-- `wezterm start --class bstl` sets the Wayland `app_id` to `bstl`, which is what the `for_window` rule keys off.
-- The `--sway` flag tells `bstl` to launch via Sway IPC, so the launched application becomes a sibling of wezterm rather than a child (so closing the wezterm window doesn't kill it). You can also set `sway = true` in the config and drop the flag.
-- If you don't care about launching over fullscreen apps, you can drop `--app-id` / `--size`; everything else still works.
+- `foot --app-id=bstl` sets the Wayland `app_id` to `bstl`, which is what the `for_window` rule keys off. The first `--app-id=bstl` is foot's flag; the second is bstl's flag for the re-resize command.
+- The `--sway` flag tells `bstl` to launch via Sway IPC, so the launched application becomes a sibling of foot rather than a child (so closing the foot window doesn't kill it). You can also set `sway = true` in the config and drop the flag.
+- If you don't care about launching over fullscreen apps, you can drop bstl's `--app-id` / `--size`; everything else still works.
 - If `bstl` isn't on `$PATH`, replace `bstl …` with the absolute path (e.g. `/usr/local/bin/bstl …`).
+- If you run the foot server (`foot --server`), use `footclient --app-id=bstl bstl --sway …` instead — same idea.
 
-The same pattern works with foot or any other terminal that supports an `app_id`/`--class` flag — just substitute the launcher and update the `for_window` selector (and the matching `--app-id`).
+The same pattern works with wezterm or any other terminal that supports an `app_id`/`--class` flag — just substitute the launcher and update the `for_window` selector (and the matching `--app-id`).
 
 ## Toggle behaviour
 
