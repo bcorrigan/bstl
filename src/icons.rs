@@ -13,6 +13,16 @@ pub fn category_icon(category: &str) -> &'static str {
         "Games" => fa::FA_GAMEPAD,
         "Education" => fa::FA_GRADUATION_CAP,
         "Settings" => fa::FA_SLIDERS,
-        _ => oct::OCT_DASH,
+        "TUI" => fa::FA_TERMINAL,
+        other => {
+            let lower = other.to_ascii_lowercase();
+            if lower.contains("script") {
+                md::MD_SCRIPT_TEXT
+            } else if lower.contains("terminal") || lower.contains("tui") || lower.contains("console") {
+                fa::FA_TERMINAL
+            } else {
+                oct::OCT_DASH
+            }
+        }
     }
 }
