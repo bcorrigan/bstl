@@ -117,6 +117,9 @@ pub struct AppEntry {
     pub exec: String,
     pub terminal: bool,
     pub comment: String,
+    /// Lowercased, trimmed Keywords= tokens. Empty if the .desktop file
+    /// declared none. Used by `matches_search` for alternative-name lookup.
+    pub keywords: Vec<String>,
 }
 
 impl AppEntry {
@@ -217,7 +220,7 @@ impl App {
         } else {
             // Fuzzy match when searching
             let mut matched: Vec<(&AppEntry, i64)> = self.apps.iter()
-                .filter_map(|a| self.matches_search(&a.name, query).map(|score| (a, score)))
+                .filter_map(|a| self.matches_search(a, query).map(|score| (a, score)))
                 .collect();
             matched.sort_by(|a, b| b.1.cmp(&a.1));
             matched.into_iter().map(|(a, _)| a).collect()
@@ -334,26 +337,34 @@ impl App {
         self.focus = Focus::Apps;
     }
 
-    /// Check if an app matches the search query using fuzzy matching
-    /// (case-insensitive). Tiered: prefix matches always rank above fuzzy
-    /// matches; within each tier, popularity in the configured window breaks
-    /// ties so frequently-launched apps surface first.
-    pub fn matches_search(&self, app_name: &str, query: &str) -> Option<i64> {
+    /// Check if an app matches the search query. Tiered, with popularity
+    /// breaking ties within each tier:
+    ///   1. Name prefix match     (e.g. "fire" → "Firefox")
+    ///   2. Keyword prefix match  (e.g. "brows" → Firefox via Keywords=Browser)
+    ///   3. Name fuzzy match
+    /// Keywords are sourced from the .desktop `Keywords=` field and are
+    /// pre-lowercased, so a keyword hit is more deliberate than a fuzzy
+    /// name hit but should never outrank typing the actual name.
+    pub fn matches_search(&self, app: &AppEntry, query: &str) -> Option<i64> {
         if query.is_empty() {
             return Some(0); // Empty query matches everything
         }
 
-        let app_name_lower = app_name.to_lowercase();
+        let app_name_lower = app.name.to_lowercase();
         let query_lower = query.to_lowercase();
-        let bonus = self.popularity_bonus(app_name);
+        let bonus = self.popularity_bonus(&app.name);
 
-        // Prefix tier: large base score puts these above fuzzy matches.
-        // Capped popularity bonus keeps a low-frequency new app discoverable.
+        // Tier 1 — name prefix.
         if app_name_lower.starts_with(&query_lower) {
             return Some(1_000_000 + bonus);
         }
 
-        // Fuzzy tier: combine score with popularity.
+        // Tier 2 — keyword prefix. Keywords are already lowercased.
+        if app.keywords.iter().any(|k| k.starts_with(&query_lower)) {
+            return Some(500_000 + bonus);
+        }
+
+        // Tier 3 — name fuzzy.
         self.fuzzy_matcher
             .fuzzy_match(&app_name_lower, &query_lower)
             .map(|s| s + bonus)
@@ -443,6 +454,7 @@ impl App {
                             exec: name.to_string(),
                             terminal: !is_gui,
                             comment: String::new(),
+                            keywords: Vec::new(),
                         });
                     }
                 }
@@ -508,6 +520,19 @@ mod tests {
     use super::*;
     use crate::config::{CursorShape, BstlConfig, LauncherTheme, SearchPosition, StartMode};
 
+    /// Build a minimal AppEntry for matches_search tests. `keywords` should
+    /// already be lowercased to match the production load path.
+    fn entry(name: &str, keywords: &[&str]) -> AppEntry {
+        AppEntry {
+            name: name.to_string(),
+            category: "Util".into(),
+            exec: name.to_lowercase(),
+            terminal: false,
+            comment: String::new(),
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     fn test_config() -> BstlConfig {
         BstlConfig {
             dmenu: false,
@@ -546,8 +571,8 @@ mod tests {
         pop.insert("Final Fantasy".to_string(), 0);
         let app = App::for_test(test_config(), pop);
 
-        let firefox = app.matches_search("Firefox", "f").unwrap();
-        let final_fantasy = app.matches_search("Final Fantasy", "f").unwrap();
+        let firefox = app.matches_search(&entry("Firefox", &[]), "f").unwrap();
+        let final_fantasy = app.matches_search(&entry("Final Fantasy", &[]), "f").unwrap();
         assert!(
             firefox > final_fantasy,
             "Firefox ({}) should outrank Final Fantasy ({})",
@@ -565,8 +590,8 @@ mod tests {
         pop.insert("Inkscape".to_string(), 1000); // wildly popular but only fuzzy-matches "f"
         let app = App::for_test(test_config(), pop);
 
-        let firefox = app.matches_search("Firefox", "f").unwrap();
-        let inkscape = app.matches_search("Inkscape", "f").unwrap_or(0);
+        let firefox = app.matches_search(&entry("Firefox", &[]), "f").unwrap();
+        let inkscape = app.matches_search(&entry("Inkscape", &[]), "f").unwrap_or(0);
         assert!(
             firefox > inkscape,
             "Prefix match Firefox ({}) must beat fuzzy match Inkscape ({})",
@@ -576,16 +601,64 @@ mod tests {
     }
 
     #[test]
+    fn keyword_prefix_match_outranks_name_fuzzy_match() {
+        // Firefox declares Keywords=Browser. Searching "brows" should hit
+        // Firefox via keyword (tier 2) and rank above an unrelated app whose
+        // name only fuzzy-matches "brows".
+        let app = App::for_test(test_config(), HashMap::new());
+        let firefox = app
+            .matches_search(&entry("Firefox", &["browser", "internet"]), "brows")
+            .expect("keyword should match");
+        // "Borderless Snap" has no relevant keyword but its name fuzzy-matches
+        // b-r-o-w-s.
+        let other = app
+            .matches_search(&entry("Borderless Snap", &[]), "brows")
+            .unwrap_or(0);
+        assert!(
+            firefox > other,
+            "keyword hit Firefox ({}) should outrank name-fuzzy hit Borderless Snap ({})",
+            firefox,
+            other
+        );
+    }
+
+    #[test]
+    fn name_prefix_outranks_keyword_prefix() {
+        // If we have an app actually named "Brow" and another with "browser"
+        // as a keyword, typing "brow" should pick the name-prefix match first.
+        let app = App::for_test(test_config(), HashMap::new());
+        let by_name = app.matches_search(&entry("Brow", &[]), "brow").unwrap();
+        let by_keyword = app
+            .matches_search(&entry("Firefox", &["browser"]), "brow")
+            .unwrap();
+        assert!(
+            by_name > by_keyword,
+            "name-prefix Brow ({}) should outrank keyword-prefix Firefox ({})",
+            by_name,
+            by_keyword
+        );
+    }
+
+    #[test]
+    fn keyword_match_is_case_insensitive() {
+        // Keywords are stored already lowercased; the query should be
+        // lowercased on the lookup side too.
+        let app = App::for_test(test_config(), HashMap::new());
+        let hit = app.matches_search(&entry("Firefox", &["browser"]), "BROW");
+        assert!(hit.is_some(), "uppercase query should still match keyword");
+    }
+
+    #[test]
     fn empty_query_default_view_puts_top_n_first() {
         let mut pop = HashMap::new();
         pop.insert("Firefox".to_string(), 50);
         pop.insert("Vim".to_string(), 30);
         let mut app = App::for_test(test_config(), pop);
         app.apps = vec![
-            AppEntry { name: "Aaa".into(), category: "Util".into(), exec: "a".into(), terminal: false, comment: String::new() },
-            AppEntry { name: "Vim".into(), category: "Util".into(), exec: "vim".into(), terminal: false, comment: String::new() },
-            AppEntry { name: "Firefox".into(), category: "Net".into(), exec: "firefox".into(), terminal: false, comment: String::new() },
-            AppEntry { name: "Zzz".into(), category: "Util".into(), exec: "z".into(), terminal: false, comment: String::new() },
+            AppEntry { name: "Aaa".into(), category: "Util".into(), exec: "a".into(), terminal: false, comment: String::new(), keywords: Vec::new() },
+            AppEntry { name: "Vim".into(), category: "Util".into(), exec: "vim".into(), terminal: false, comment: String::new(), keywords: Vec::new() },
+            AppEntry { name: "Firefox".into(), category: "Net".into(), exec: "firefox".into(), terminal: false, comment: String::new(), keywords: Vec::new() },
+            AppEntry { name: "Zzz".into(), category: "Util".into(), exec: "z".into(), terminal: false, comment: String::new(), keywords: Vec::new() },
         ];
 
         let visible = app.visible_apps();

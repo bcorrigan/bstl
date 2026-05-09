@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use crate::app::AppEntry;
 use crate::menu;
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 pub struct Storage {
     conn: Connection,
@@ -23,6 +23,7 @@ pub struct CachedApp {
     pub exec: String,
     pub terminal: bool,
     pub comment: String,
+    pub raw_keywords: String,
 }
 
 impl Storage {
@@ -145,6 +146,34 @@ impl Storage {
                     raw_categories TEXT NOT NULL,
                     terminal       INTEGER NOT NULL,
                     comment        TEXT NOT NULL DEFAULT '',
+                    source_path    TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL
+                );
+                CREATE INDEX apps_source ON apps(source_path);
+                CREATE TABLE scan_meta (
+                    directory  TEXT PRIMARY KEY,
+                    dir_mtime  INTEGER NOT NULL,
+                    scanned_at INTEGER NOT NULL
+                );
+                "#,
+            )?;
+        }
+        if current < 4 {
+            // v4 adds a `keywords` column sourced from the .desktop Keywords=
+            // field, so search can match alternative names (e.g. "browser"
+            // matching Firefox). Drop the cache so refresh_app_cache
+            // repopulates with the new shape on next launch.
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS apps;
+                DROP TABLE IF EXISTS scan_meta;
+                CREATE TABLE apps (
+                    name           TEXT PRIMARY KEY,
+                    exec           TEXT NOT NULL,
+                    raw_categories TEXT NOT NULL,
+                    terminal       INTEGER NOT NULL,
+                    comment        TEXT NOT NULL DEFAULT '',
+                    keywords       TEXT NOT NULL DEFAULT '',
                     source_path    TEXT NOT NULL,
                     file_mtime     INTEGER NOT NULL
                 );
@@ -286,14 +315,15 @@ impl Storage {
                     // files declare the same Name=. Last-writer wins, matching the old
                     // behavior loosely (the old code skipped duplicates).
                     tx.execute(
-                        "INSERT OR REPLACE INTO apps(name, exec, raw_categories, terminal, comment, source_path, file_mtime)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO apps(name, exec, raw_categories, terminal, comment, keywords, source_path, file_mtime)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         params![
                             app.name,
                             app.exec,
                             app.raw_categories,
                             app.terminal as i32,
                             app.comment,
+                            app.raw_keywords,
                             path_str,
                             file_mtime,
                         ],
@@ -347,7 +377,7 @@ impl Storage {
     /// 2. falling back to the hardcoded bucket logic in `group_category`.
     pub fn load_apps(&self, overrides: &HashMap<String, String>) -> Result<Vec<AppEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, exec, raw_categories, terminal, comment FROM apps ORDER BY name COLLATE NOCASE",
+            "SELECT name, exec, raw_categories, terminal, comment, keywords FROM apps ORDER BY name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -356,11 +386,12 @@ impl Storage {
                 r.get::<_, String>(2)?,
                 r.get::<_, i32>(3)? != 0,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (name, exec, raw_cats, terminal, comment) = r?;
+            let (name, exec, raw_cats, terminal, comment, raw_keywords) = r?;
             let category = menu::override_category(&raw_cats, overrides)
                 .unwrap_or_else(|| group_category(&raw_cats, &name));
             out.push(AppEntry {
@@ -369,6 +400,7 @@ impl Storage {
                 exec,
                 terminal,
                 comment,
+                keywords: parse_keywords(&raw_keywords),
             });
         }
         Ok(out)
@@ -435,6 +467,7 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
     let mut exec: Option<String> = None;
     let mut categories: Option<String> = None;
     let mut comment: Option<String> = None;
+    let mut keywords: Option<String> = None;
     let mut no_display = false;
     let mut terminal = false;
     let mut only_show_in: Option<Vec<String>> = None;
@@ -464,6 +497,7 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
             "Exec" => exec = Some(value.to_string()),
             "Categories" => categories = Some(value.to_string()),
             "Comment" => comment = Some(value.to_string()),
+            "Keywords" => keywords = Some(value.to_string()),
             "NoDisplay" => no_display = value == "true",
             "Hidden" => no_display = no_display || value == "true",
             "Terminal" => terminal = value == "true",
@@ -524,7 +558,17 @@ fn parse_desktop_file(path: &Path, current_desktops: &[String]) -> Option<Cached
         exec: exec_clean,
         terminal,
         comment: comment.unwrap_or_default(),
+        raw_keywords: keywords.unwrap_or_default(),
     })
+}
+
+/// Split a raw `Keywords=` string (semicolon-delimited) into a list of
+/// lowercased, trimmed tokens. Empty entries are dropped.
+fn parse_keywords(raw: &str) -> Vec<String> {
+    raw.split(';')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn clean_exec(exec: &str) -> String {
@@ -671,6 +715,29 @@ mod tests {
         let parsed = parse_desktop_file(&path, &[]).expect("should parse");
         assert_eq!(parsed.comment, "A handy little tool");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_desktop_file_extracts_keywords() {
+        let dir = tempdir_with_prefix("bstl_parse_keywords");
+        let path = dir.join("ff.desktop");
+        fs::write(
+            &path,
+            "[Desktop Entry]\nName=Firefox\nExec=firefox\nKeywords=Browser;Internet;WWW;\nKeywords[de]=Internetz;\n",
+        )
+        .unwrap();
+        let parsed = parse_desktop_file(&path, &[]).expect("should parse");
+        // Stored as the raw English string; locale variant is ignored.
+        assert_eq!(parsed.raw_keywords, "Browser;Internet;WWW;");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_keywords_splits_and_lowercases() {
+        let kws = parse_keywords("Browser; Internet ;WWW;");
+        assert_eq!(kws, vec!["browser", "internet", "www"]);
+        assert!(parse_keywords("").is_empty());
+        assert!(parse_keywords(";;").is_empty());
     }
 
     #[test]

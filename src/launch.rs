@@ -133,6 +133,7 @@ mod tests {
             exec: "vim".to_string(),
             terminal: true,
             comment: String::new(),
+            keywords: Vec::new(),
         };
         let config = make_config("alacritty");
         let cmd = build_command(&entry, &config);
@@ -151,6 +152,7 @@ mod tests {
             exec: "vim".to_string(),
             terminal: true,
             comment: String::new(),
+            keywords: Vec::new(),
         };
         let config = make_config("wezterm start");
         let cmd = build_command(&entry, &config);
@@ -180,6 +182,7 @@ mod tests {
             exec: "/home/bc/bin/,fullcharge".to_string(),
             terminal: false,
             comment: String::new(),
+            keywords: Vec::new(),
         };
         let cmd = build_command(&entry, &make_config("wezterm"));
         let s = build_sway_exec_string(&cmd);

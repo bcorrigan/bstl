@@ -28,12 +28,12 @@ pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, confi
                     app.recent_apps.iter().any(|recent_name| {
                         app.apps.iter()
                             .find(|a| &a.name == recent_name)
-                            .and_then(|a| app.matches_search(&a.name, &query_lower))
+                            .and_then(|a| app.matches_search(a, &query_lower))
                             .is_some()
                     })
                 } else {
                     app.apps.iter().any(|a| {
-                        &a.category == *cat_name && app.matches_search(&a.name, &query_lower).is_some()
+                        &a.category == *cat_name && app.matches_search(a, &query_lower).is_some()
                     })
                 }
             })
@@ -63,13 +63,13 @@ pub fn draw(f: &mut Frame, app: &mut App, search_position: SearchPosition, confi
                     .find(|a| &a.name == recent_name)
                     .cloned()
             })
-            .filter_map(|a| app.matches_search(&a.name, &query_lower).map(|score| (a, score)))
+            .filter_map(|a| app.matches_search(&a, &query_lower).map(|score| (a, score)))
             .collect()
     } else {
         app.apps
             .iter()
             .filter(|a| a.category == selected_category_name)
-            .filter_map(|a| app.matches_search(&a.name, &query_lower).map(|score| (a.clone(), score)))
+            .filter_map(|a| app.matches_search(a, &query_lower).map(|score| (a.clone(), score)))
             .collect()
     };
     

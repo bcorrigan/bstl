@@ -211,12 +211,12 @@ fn get_matching_category_indices(app: &App) -> Vec<usize> {
                     app.recent_apps.iter().any(|recent_name| {
                         app.apps.iter()
                             .find(|a| &a.name == recent_name)
-                            .and_then(|a| app.matches_search(&a.name, &query_lower))
+                            .and_then(|a| app.matches_search(a, &query_lower))
                             .is_some()
                     })
                 } else {
                     app.apps.iter().any(|a| {
-                        &a.category == *cat_name && app.matches_search(&a.name, &query_lower).is_some()
+                        &a.category == *cat_name && app.matches_search(a, &query_lower).is_some()
                     })
                 }
             })
@@ -263,7 +263,7 @@ fn get_selected_app(app: &App) -> Option<&crate::app::AppEntry> {
                 if !query.is_empty() {
                     let mut apps_with_scores: Vec<(&crate::app::AppEntry, i64)> = apps_in_order
                         .into_iter()
-                        .filter_map(|a| app.matches_search(&a.name, &query).map(|score| (a, score)))
+                        .filter_map(|a| app.matches_search(a, &query).map(|score| (a, score)))
                         .collect();
                     apps_with_scores.sort_by(|a, b| b.1.cmp(&a.1));
                     return apps_with_scores.get(app.selected_app).map(|(entry, _)| *entry);
@@ -273,7 +273,7 @@ fn get_selected_app(app: &App) -> Option<&crate::app::AppEntry> {
             } else {
                 let mut apps_with_scores: Vec<(&crate::app::AppEntry, i64)> = app.apps.iter()
                     .filter(|a| &a.category == cat_name)
-                    .filter_map(|a| app.matches_search(&a.name, &query).map(|score| (a, score)))
+                    .filter_map(|a| app.matches_search(a, &query).map(|score| (a, score)))
                     .collect();
 
                 if !query.is_empty() {
@@ -303,12 +303,12 @@ fn count_filtered_apps_in_current_category(app: &App) -> usize {
                     .filter_map(|recent_name| {
                         app.apps.iter().find(|a| &a.name == recent_name)
                     })
-                    .filter(|a| app.matches_search(&a.name, &query).is_some())
+                    .filter(|a| app.matches_search(a, &query).is_some())
                     .count()
             } else {
                 app.apps.iter()
                     .filter(|a| &a.category == cat_name)
-                    .filter(|a| app.matches_search(&a.name, &query).is_some())
+                    .filter(|a| app.matches_search(a, &query).is_some())
                     .count()
             }
         }
