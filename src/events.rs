@@ -133,10 +133,13 @@ fn navigate_up(app: &mut App) {
                 Focus::Categories => {
                     let matching_categories = get_matching_category_indices(app);
                     if let Some(current_pos) = matching_categories.iter().position(|&idx| idx == app.selected_category) {
-                        if current_pos > 0 {
-                            app.selected_category = matching_categories[current_pos - 1];
-                            app.selected_app = 0;
-                        }
+                        let new_pos = if current_pos > 0 {
+                            current_pos - 1
+                        } else {
+                            matching_categories.len() - 1
+                        };
+                        app.selected_category = matching_categories[new_pos];
+                        app.selected_app = 0;
                     }
                 }
                 _ => { // Focus::Apps or Search (effectively Apps)
@@ -162,10 +165,13 @@ fn navigate_down(app: &mut App) {
                 Focus::Categories => {
                     let matching_categories = get_matching_category_indices(app);
                     if let Some(current_pos) = matching_categories.iter().position(|&idx| idx == app.selected_category) {
-                        if current_pos + 1 < matching_categories.len() {
-                            app.selected_category = matching_categories[current_pos + 1];
-                            app.selected_app = 0;
-                        }
+                        let new_pos = if current_pos + 1 < matching_categories.len() {
+                            current_pos + 1
+                        } else {
+                            0
+                        };
+                        app.selected_category = matching_categories[new_pos];
+                        app.selected_app = 0;
                     }
                 }
                 _ => { // Focus::Apps
